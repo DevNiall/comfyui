@@ -9,32 +9,34 @@ HF_TOKEN_PARAM := /comfyui/hf-token
 LOCAL_PORT     := 8181
 REMOTE_PORT    := 8181
 
-# Resolve region
-REGION := $(or $(AWS_DEFAULT_REGION),$(shell aws configure get region 2>/dev/null),us-east-1)
+# Resolve region and profile
+REGION      := $(or $(AWS_DEFAULT_REGION),$(shell aws configure get region 2>/dev/null),eu-west-2)
+AWS_PROFILE := $(or $(AWS_PROFILE),default)
+$(info AWS Profile : $(AWS_PROFILE)  |  Region : $(REGION))
 
 # Dynamic lookups (lazy evaluation)
 ASG_NAME = $(shell aws cloudformation describe-stacks \
 	--stack-name $(STACK_NAME) \
 	--query 'Stacks[0].Outputs[?OutputKey==`ASGName`].OutputValue' \
-	--output text --region $(REGION) 2>/dev/null)
+	--output text --region $(REGION) --profile $(AWS_PROFILE) 2>/dev/null)
 
 STACK_TAG = $(shell aws cloudformation describe-stacks \
 	--stack-name $(STACK_NAME) \
 	--query 'Stacks[0].Outputs[?OutputKey==`StackTag`].OutputValue' \
-	--output text --region $(REGION) 2>/dev/null)
+	--output text --region $(REGION) --profile $(AWS_PROFILE) 2>/dev/null)
 
 INSTANCE_ID = $(shell aws ec2 describe-instances \
 	--filters "Name=tag:Name,Values=ComfyUI-Host" \
 	          "Name=instance-state-name,Values=running" \
 	--query 'Reservations[].Instances[].InstanceId' \
-	--output text --region $(REGION) 2>/dev/null)
+	--output text --region $(REGION) --profile $(AWS_PROFILE) 2>/dev/null)
 
 VOLUME_ID = $(shell aws ec2 describe-volumes \
 	--filters "Name=tag:Name,Values=comfyui-data" \
 	          "Name=tag:comfyui-stack,Values=$(STACK_TAG)" \
 	          "Name=status,Values=in-use" \
 	--query 'Volumes[0].VolumeId' \
-	--output text --region $(REGION) 2>/dev/null)
+	--output text --region $(REGION) --profile $(AWS_PROFILE) 2>/dev/null)
 
 # ============================================================================
 # CDK Operations
@@ -42,14 +44,18 @@ VOLUME_ID = $(shell aws ec2 describe-volumes \
 
 .PHONY: ensure-hf-token
 ensure-hf-token: ## Check HF token SSM parameter exists (prerequisite for deploy)
-	@EXISTING=$$(aws ssm get-parameter --name "$(HF_TOKEN_PARAM)" \
-		--query 'Parameter.Name' --output text --region $(REGION) 2>/dev/null || echo "") && \
-	if [ -z "$$EXISTING" ]; then \
-		echo "❌ HuggingFace token not found at $(HF_TOKEN_PARAM)."; \
-		echo "   Run 'make set-hf-token' before deploying."; \
+	@RESULT=$$(aws ssm get-parameter --name "$(HF_TOKEN_PARAM)" \
+		--query 'Parameter.Name' --output text --region $(REGION) --profile $(AWS_PROFILE) 2>&1); \
+	EXIT=$$?; \
+	if [ $$EXIT -eq 0 ]; then \
+		echo "✅ HuggingFace token found at $(HF_TOKEN_PARAM)"; \
+	elif echo "$$RESULT" | grep -q "ParameterNotFound"; then \
+		echo "❌ HuggingFace token not set. Run 'make set-hf-token' before deploying."; \
 		exit 1; \
 	else \
-		echo "✅ HuggingFace token found at $(HF_TOKEN_PARAM)"; \
+		echo "❌ AWS authentication failed — cannot verify HF token. Check credentials for profile '$(AWS_PROFILE)'."; \
+		echo "   $$RESULT"; \
+		exit 1; \
 	fi
 
 .PHONY: deploy
@@ -84,7 +90,7 @@ start: ## Start the ComfyUI instance (set ASG desired=1)
 	aws autoscaling set-desired-capacity \
 		--auto-scaling-group-name "$(ASG_NAME)" \
 		--desired-capacity 1 \
-		--region $(REGION)
+		--region $(REGION) --profile $(AWS_PROFILE)
 	@echo "Instance launching. Run 'make status' to check progress."
 
 .PHONY: stop
@@ -93,7 +99,7 @@ stop: ## Stop the ComfyUI instance (set ASG desired=0, triggers snapshot)
 	aws autoscaling set-desired-capacity \
 		--auto-scaling-group-name "$(ASG_NAME)" \
 		--desired-capacity 0 \
-		--region $(REGION)
+		--region $(REGION) --profile $(AWS_PROFILE)
 	@echo "Instance terminating. Lifecycle hook will snapshot data volume."
 
 .PHONY: status
@@ -102,27 +108,27 @@ status: ## Show instance, ASG, and snapshot status
 	@aws autoscaling describe-auto-scaling-groups \
 		--auto-scaling-group-names "$(ASG_NAME)" \
 		--query 'AutoScalingGroups[0].{DesiredCapacity:DesiredCapacity,Instances:Instances[].{Id:InstanceId,State:LifecycleState,Health:HealthStatus}}' \
-		--output table --region $(REGION) 2>/dev/null || echo "ASG not found"
+		--output table --region $(REGION) --profile $(AWS_PROFILE) 2>/dev/null || echo "ASG not found"
 	@echo ""
 	@echo "=== EC2 Instance ==="
 	@aws ec2 describe-instances \
 		--filters "Name=tag:Name,Values=ComfyUI-Host" \
 		--query 'Reservations[].Instances[].{Id:InstanceId,State:State.Name,Type:InstanceType,AZ:Placement.AvailabilityZone,LaunchTime:LaunchTime}' \
-		--output table --region $(REGION) 2>/dev/null || echo "No instances"
+		--output table --region $(REGION) --profile $(AWS_PROFILE) 2>/dev/null || echo "No instances"
 	@echo ""
 	@echo "=== Latest Snapshot ==="
 	@aws ec2 describe-snapshots \
 		--filters "Name=tag:comfyui-stack,Values=$(STACK_TAG)" \
 		--owner-ids self \
 		--query 'sort_by(Snapshots,&StartTime)[-1].{Id:SnapshotId,State:State,StartTime:StartTime,Size:VolumeSize,CreatedBy:Tags[?Key==`CreatedBy`].Value|[0]}' \
-		--output table --region $(REGION) 2>/dev/null || echo "No snapshots"
+		--output table --region $(REGION) --profile $(AWS_PROFILE) 2>/dev/null || echo "No snapshots"
 
 # ============================================================================
 # Connectivity
 # ============================================================================
 
 .PHONY: connect
-connect: ## SSH into the EC2 host via SSM Session Manager
+connect: ## Open a shell on the EC2 host via SSM Session Manager
 	@if [ -z "$(INSTANCE_ID)" ]; then \
 		echo "❌ No running ComfyUI instance found. Run 'make start' first."; \
 		exit 1; \
@@ -130,7 +136,7 @@ connect: ## SSH into the EC2 host via SSM Session Manager
 	@echo "🔗 Connecting to instance $(INSTANCE_ID)..."
 	aws ssm start-session \
 		--target "$(INSTANCE_ID)" \
-		--region $(REGION)
+		--region $(REGION) --profile $(AWS_PROFILE)
 
 .PHONY: comfyui
 comfyui: ## Port-forward ComfyUI (localhost:8181) via SSM
@@ -144,10 +150,10 @@ comfyui: ## Port-forward ComfyUI (localhost:8181) via SSM
 		--target "$(INSTANCE_ID)" \
 		--document-name AWS-StartPortForwardingSession \
 		--parameters '{"portNumber":["$(REMOTE_PORT)"],"localPortNumber":["$(LOCAL_PORT)"]}' \
-		--region $(REGION)
+		--region $(REGION) --profile $(AWS_PROFILE)
 
-.PHONY: ssh-container
-ssh-container: ## Shell into the ComfyUI Docker container
+.PHONY: connect-container
+connect-container: ## Open a shell inside the ComfyUI Docker container via SSM
 	@if [ -z "$(INSTANCE_ID)" ]; then \
 		echo "❌ No running ComfyUI instance found. Run 'make start' first."; \
 		exit 1; \
@@ -157,7 +163,7 @@ ssh-container: ## Shell into the ComfyUI Docker container
 		--target "$(INSTANCE_ID)" \
 		--document-name AWS-StartInteractiveCommand \
 		--parameters '{"command":["sudo docker exec -it comfyui /bin/bash"]}' \
-		--region $(REGION)
+		--region $(REGION) --profile $(AWS_PROFILE)
 
 .PHONY: logs
 logs: ## Tail ComfyUI container logs (works even if container has exited)
@@ -170,7 +176,7 @@ logs: ## Tail ComfyUI container logs (works even if container has exited)
 		--target "$(INSTANCE_ID)" \
 		--document-name AWS-StartInteractiveCommand \
 		--parameters '{"command":["sudo docker logs --tail 200 -f comfyui 2>&1 || echo \"Container not found or never started\""]}' \
-		--region $(REGION)
+		--region $(REGION) --profile $(AWS_PROFILE)
 
 .PHONY: diagnose
 diagnose: ## Show full boot diagnostics: bootstrap log + docker state + cloud-init
@@ -183,7 +189,7 @@ diagnose: ## Show full boot diagnostics: bootstrap log + docker state + cloud-in
 		--target "$(INSTANCE_ID)" \
 		--document-name AWS-StartInteractiveCommand \
 		--parameters '{"command":["bash -c \"echo \\\"=== DOCKER CONTAINERS (all) ===\\\" && sudo docker ps -a --format \\\"table {{.Names}}\\t{{.Status}}\\t{{.Image}}\\\" 2>/dev/null || echo no-docker; echo; echo \\\"=== MOUNTS ===\\\" && mount | grep /data || echo not-mounted; echo; echo \\\"=== BOOTSTRAP LOG ===\\\" && cat /var/log/comfyui-bootstrap.log 2>/dev/null || echo log-not-found; echo; echo \\\"=== CLOUD-INIT OUTPUT (last 40 lines) ===\\\" && tail -40 /var/log/cloud-init-output.log 2>/dev/null || echo no-cloud-init-log\""]}' \
-		--region $(REGION)
+		--region $(REGION) --profile $(AWS_PROFILE)
 
 .PHONY: bootstrap-log
 bootstrap-log: ## View the EC2 bootstrap log
@@ -196,7 +202,7 @@ bootstrap-log: ## View the EC2 bootstrap log
 		--target "$(INSTANCE_ID)" \
 		--document-name AWS-StartInteractiveCommand \
 		--parameters '{"command":["cat /var/log/comfyui-bootstrap.log"]}' \
-		--region $(REGION)
+		--region $(REGION) --profile $(AWS_PROFILE)
 
 # ============================================================================
 # Snapshots
@@ -214,7 +220,7 @@ snapshot: ## Create a manual EBS snapshot of the data volume right now
 		--description "ComfyUI manual snapshot - $$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
 		--tag-specifications "ResourceType=snapshot,Tags=[{Key=Name,Value=comfyui-data},{Key=comfyui-stack,Value=$(STACK_TAG)},{Key=CreatedBy,Value=manual},{Key=CreatedAt,Value=$$(date -u +%Y-%m-%dT%H:%M:%SZ)}]" \
 		--query 'SnapshotId' --output text \
-		--region $(REGION)) && \
+		--region $(REGION) --profile $(AWS_PROFILE)) && \
 	echo "✅ Snapshot initiated: $$SNAP_ID" && \
 	echo "   Snapshot will complete in the background."
 
@@ -225,7 +231,7 @@ list-snapshots: ## List all ComfyUI data snapshots
 		--filters "Name=tag:comfyui-stack,Values=$(STACK_TAG)" \
 		--owner-ids self \
 		--query 'sort_by(Snapshots,&StartTime)[].{Id:SnapshotId,State:State,Started:StartTime,Size:VolumeSize,CreatedBy:Tags[?Key==`CreatedBy`].Value|[0],Progress:Progress}' \
-		--output table --region $(REGION)
+		--output table --region $(REGION) --profile $(AWS_PROFILE)
 
 # ============================================================================
 # HuggingFace Token
@@ -239,7 +245,7 @@ set-hf-token: ## Set your HuggingFace API token (stored encrypted in SSM)
 		--value "$$HF_TOKEN" \
 		--type SecureString \
 		--overwrite \
-		--region $(REGION) > /dev/null && \
+		--region $(REGION) --profile $(AWS_PROFILE) > /dev/null && \
 	echo "✅ HuggingFace token stored at $(HF_TOKEN_PARAM)" && \
 	echo "   Restart the instance ('make stop && make start') to pick up the new token."
 
@@ -249,7 +255,7 @@ get-hf-token: ## Show whether HF token is configured (masked)
 		--name "$(HF_TOKEN_PARAM)" \
 		--with-decryption \
 		--query 'Parameter.Value' --output text \
-		--region $(REGION) 2>/dev/null || echo "not-found") && \
+		--region $(REGION) --profile $(AWS_PROFILE) 2>/dev/null || echo "not-found") && \
 	if [ "$$TOKEN" = "not-set" ] || [ "$$TOKEN" = "not-found" ]; then \
 		echo "❌ HuggingFace token not configured. Run 'make set-hf-token'."; \
 	else \
@@ -269,9 +275,9 @@ delete-snapshots: ## Delete ALL ComfyUI snapshots (interactive confirmation)
 			--filters "Name=tag:comfyui-stack,Values=$(STACK_TAG)" \
 			--owner-ids self \
 			--query 'Snapshots[].SnapshotId' --output text \
-			--region $(REGION) | tr '\t' '\n' | while read SNAP; do \
+			--region $(REGION) --profile $(AWS_PROFILE) | tr '\t' '\n' | while read SNAP; do \
 				echo "Deleting $$SNAP..."; \
-				aws ec2 delete-snapshot --snapshot-id "$$SNAP" --region $(REGION) 2>/dev/null || true; \
+				aws ec2 delete-snapshot --snapshot-id "$$SNAP" --region $(REGION) --profile $(AWS_PROFILE) 2>/dev/null || true; \
 			done; \
 		echo "✅ All snapshots deleted."; \
 	else \
@@ -286,10 +292,10 @@ delete-volumes: ## Delete orphaned comfyui-data volumes (available/not attached)
 		          "Name=tag:comfyui-stack,Values=$(STACK_TAG)" \
 		          "Name=status,Values=available" \
 		--query 'Volumes[].VolumeId' --output text \
-		--region $(REGION) | tr '\t' '\n' | while read VOL; do \
+		--region $(REGION) --profile $(AWS_PROFILE) | tr '\t' '\n' | while read VOL; do \
 			if [ -n "$$VOL" ] && [ "$$VOL" != "None" ]; then \
 				echo "Deleting orphaned volume $$VOL..."; \
-				aws ec2 delete-volume --volume-id "$$VOL" --region $(REGION); \
+				aws ec2 delete-volume --volume-id "$$VOL" --region $(REGION) --profile $(AWS_PROFILE); \
 			fi; \
 		done
 	@echo "Done."

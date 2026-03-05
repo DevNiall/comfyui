@@ -1,5 +1,5 @@
-FROM nvidia/cuda:12.6.3-runtime-ubuntu22.04
-
+# FROM nvidia/cuda:12.6.3-runtime-ubuntu22.04
+FROM nvidia/cuda:13.1.1-devel-ubuntu24.04
 ENV DEBIAN_FRONTEND=noninteractive TZ=America/Los_Angeles
 
 # System packages — includes btop, tmux for monitoring/multiplexing
@@ -7,15 +7,17 @@ RUN apt-get update && apt-get install -y \
     git make build-essential libssl-dev zlib1g-dev \
     libbz2-dev libreadline-dev libsqlite3-dev wget curl llvm \
     libncursesw5-dev xz-utils tk-dev libxml2-dev libxmlsec1-dev libffi-dev liblzma-dev \
-    git-lfs ffmpeg libsm6 libxext6 cmake libgl1-mesa-glx \
+    git-lfs ffmpeg libsm6 libxext6 cmake libgl1 libopengl0 \
+    cuda-nvcc-13-1 \
+    libcusparse-dev-13-1 libcublas-dev-13-1 libcusolver-dev-13-1 \
+    libcufft-dev-13-1 libcurand-dev-13-1 cuda-cudart-dev-13-1 \
     btop tmux \
     && rm -rf /var/lib/apt/lists/* \
     && git lfs install
 
-# Non-root user
-RUN useradd -m -u 1000 user
-USER user
-ENV HOME=/home/user PATH=/home/user/.local/bin:$PATH
+# Use existing non-root user from base image
+USER ubuntu
+ENV HOME=/home/ubuntu PATH=/home/ubuntu/.local/bin:$PATH
 
 # Python via pyenv
 RUN curl https://pyenv.run | bash
@@ -34,21 +36,22 @@ RUN pip install --no-cache-dir \
 RUN pip install --no-cache-dir nvitop
 
 # ComfyUI
-WORKDIR /home/user/opt/ComfyUI
+WORKDIR /home/ubuntu/opt/ComfyUI
 RUN git clone --depth 1 https://github.com/comfyanonymous/ComfyUI . && \
     pip install --no-cache-dir -r requirements.txt
-
-# ComfyUI-Manager
-RUN mkdir -p custom_nodes/ComfyUI-Manager && \
-    git clone --depth 1 https://github.com/Comfy-Org/ComfyUI-Manager custom_nodes/ComfyUI-Manager && \
-    pip install --no-cache-dir -r custom_nodes/ComfyUI-Manager/requirements.txt
 
 # Model paths config
 COPY extra_model_paths.yaml ./extra_model_paths.yaml
 
+# Entrypoint — seeds plugins declared in entrypoint.sh into the EBS-mounted
+# custom_nodes/ dir on first boot, then execs the CMD.
+COPY --chown=ubuntu:ubuntu entrypoint.sh ./entrypoint.sh
+RUN chmod +x ./entrypoint.sh
+
 EXPOSE 8181
 
-CMD ["python", "/home/user/opt/ComfyUI/main.py", \
+ENTRYPOINT ["./entrypoint.sh"]
+CMD ["python", "/home/ubuntu/opt/ComfyUI/main.py", \
      "--listen", "0.0.0.0", \
      "--port", "8181", \
-     "--output-directory", "/home/user/opt/ComfyUI/output/"]
+     "--output-directory", "/home/ubuntu/opt/ComfyUI/output/"]

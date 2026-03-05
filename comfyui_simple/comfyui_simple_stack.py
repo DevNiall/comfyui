@@ -42,7 +42,7 @@ class ComfyUISimpleStack(Stack):
         scope: Construct,
         construct_id: str,
         # Instance config
-        instance_type: str = "g6.2xlarge",
+        instance_type: str = "g4dn.2xlarge",
         fallback_instance_types: List[str] = None,
         spot_max_price: str = "1.20",
         # Data volume
@@ -52,14 +52,14 @@ class ComfyUISimpleStack(Stack):
         snapshot_retain_count: int = 3,
         # SSM parameter path for HuggingFace token
         hf_token_param_path: str = "/comfyui/hf-token",
-        # Existing VPC (set to None to create a new minimal VPC)
+        # VPC ID (required — stack will raise if not provided)
         vpc_id: str = "vpc-0a0078c96978cb8bb",
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
         if fallback_instance_types is None:
-            fallback_instance_types = ["g5.2xlarge", "g6.xlarge", "g5.xlarge"]
+            fallback_instance_types = ["g6.2xlarge", "g6.xlarge", "g5.2xlarge", "g5.xlarge", "g4dn.xlarge"]
 
         # Unique suffix for resource naming
         unique_input = f"{self.account}-{self.region}-{self.stack_name}"
@@ -67,23 +67,14 @@ class ComfyUISimpleStack(Stack):
         stack_tag_value = f"comfyui-{suffix}"
 
         # ------------------------------------------------------------------ #
-        # VPC — use existing or create a minimal single-AZ public-only
+        # VPC — must be provided; VPC creation is not supported
         # ------------------------------------------------------------------ #
-        if vpc_id:
-            vpc = ec2.Vpc.from_lookup(self, "VPC", vpc_id=vpc_id)
-        else:
-            vpc = ec2.Vpc(
-                self, "VPC",
-                max_azs=1,
-                nat_gateways=0,
-                subnet_configuration=[
-                    ec2.SubnetConfiguration(
-                        name="Public",
-                        subnet_type=ec2.SubnetType.PUBLIC,
-                        cidr_mask=24,
-                    ),
-                ],
+        if not vpc_id:
+            raise ValueError(
+                "vpc_id must be specified. "
+                "Automatic VPC creation is not supported by this stack."
             )
+        vpc = ec2.Vpc.from_lookup(self, "VPC", vpc_id=vpc_id)
 
         # ------------------------------------------------------------------ #
         # Security Group — no inbound (SSM only), all outbound
@@ -169,159 +160,18 @@ class ComfyUISimpleStack(Stack):
         )
 
         # ------------------------------------------------------------------ #
-        # User Data — bootstrap script
+        # User Data — loaded from scripts/userdata.sh
         # ------------------------------------------------------------------ #
-        user_data = ec2.UserData.for_linux()
-        user_data.add_commands(
-            "#!/bin/bash",
-            "set -euo pipefail",
-            "exec > >(tee /var/log/comfyui-bootstrap.log) 2>&1",
-            "# Ensure AWS CLI and other tools are on PATH (cloud-init runs with minimal PATH)",
-            "export PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH",
-            'echo "=== ComfyUI Bootstrap Starting ==="',
-            "",
-            "# Install AWS CLI v2 if not present (ECS GPU AMI ships without it)",
-            "if ! command -v aws &>/dev/null; then",
-            '  echo "AWS CLI not found — installing AWS CLI v2..."',
-            "  yum install -y unzip",
-            "  curl -fsSL 'https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip' -o /tmp/awscliv2.zip",
-            "  unzip -q /tmp/awscliv2.zip -d /tmp/awscliv2",
-            "  /tmp/awscliv2/aws/install --bin-dir /usr/local/bin --install-dir /usr/local/aws-cli --update",
-            "  rm -rf /tmp/awscliv2.zip /tmp/awscliv2",
-            '  echo "AWS CLI v2 installed: $(aws --version)"',
-            "fi",
-            "",
-            "# Stop ECS agent — we run Docker directly",
-            "systemctl stop ecs 2>/dev/null || true",
-            "systemctl disable ecs 2>/dev/null || true",
-            "",
-            "# Metadata",
-            "TOKEN=$(curl -sX PUT 'http://169.254.169.254/latest/api/token' -H 'X-aws-ec2-metadata-token-ttl-seconds: 300')",
-            "REGION=$(curl -s -H \"X-aws-ec2-metadata-token: $TOKEN\" http://169.254.169.254/latest/meta-data/placement/region)",
-            "INSTANCE_ID=$(curl -s -H \"X-aws-ec2-metadata-token: $TOKEN\" http://169.254.169.254/latest/meta-data/instance-id)",
-            "AZ=$(curl -s -H \"X-aws-ec2-metadata-token: $TOKEN\" http://169.254.169.254/latest/meta-data/placement/availability-zone)",
-            "",
-            f'STACK_TAG="{stack_tag_value}"',
-            f'VOLUME_SIZE={data_volume_size_gb}',
-            f'ECR_IMAGE="{docker_image_asset.image_uri}"',
-            f'HF_TOKEN_PARAM="{hf_token_param_path}"',
-            "",
-            "# --- Find latest snapshot ---",
-            'echo "Looking for latest snapshot with tag comfyui-stack=$STACK_TAG..."',
-            "SNAPSHOT_ID=$(aws ec2 describe-snapshots \\",
-            '  --filters "Name=tag:comfyui-stack,Values=$STACK_TAG" \\',
-            '  --owner-ids self \\',
-            "  --query 'sort_by(Snapshots,&StartTime)[-1].SnapshotId' \\",
-            "  --output text \\",
-            "  --region $REGION)",
-            "",
-            '# --- Create or restore data volume ---',
-            'if [ "$SNAPSHOT_ID" != "None" ] && [ -n "$SNAPSHOT_ID" ]; then',
-            '  echo "Restoring from snapshot: $SNAPSHOT_ID"',
-            "  VOLUME_ID=$(aws ec2 create-volume \\",
-            "    --availability-zone $AZ \\",
-            "    --size $VOLUME_SIZE \\",
-            "    --volume-type gp3 \\",
-            "    --snapshot-id $SNAPSHOT_ID \\",
-            "    --tag-specifications \"ResourceType=volume,Tags=[{Key=Name,Value=comfyui-data},{Key=comfyui-stack,Value=$STACK_TAG}]\" \\",
-            "    --query 'VolumeId' --output text \\",
-            "    --region $REGION)",
-            "  FROM_SNAPSHOT=true",
-            "else",
-            '  echo "No snapshot found — creating fresh volume"',
-            "  VOLUME_ID=$(aws ec2 create-volume \\",
-            "    --availability-zone $AZ \\",
-            "    --size $VOLUME_SIZE \\",
-            "    --volume-type gp3 \\",
-            "    --tag-specifications \"ResourceType=volume,Tags=[{Key=Name,Value=comfyui-data},{Key=comfyui-stack,Value=$STACK_TAG}]\" \\",
-            "    --query 'VolumeId' --output text \\",
-            "    --region $REGION)",
-            "  FROM_SNAPSHOT=false",
-            "fi",
-            "",
-            '# --- Wait for volume to be available ---',
-            'echo "Waiting for volume $VOLUME_ID to become available..."',
-            "aws ec2 wait volume-available --volume-ids $VOLUME_ID --region $REGION",
-            "",
-            "# --- Attach volume ---",
-            'echo "Attaching volume $VOLUME_ID to $INSTANCE_ID as /dev/sdf..."',
-            "aws ec2 attach-volume \\",
-            "  --volume-id $VOLUME_ID \\",
-            "  --instance-id $INSTANCE_ID \\",
-            "  --device /dev/sdf \\",
-            "  --region $REGION",
-            "",
-            "# Wait for attachment",
-            "echo 'Waiting for volume attachment...'",
-            "for i in $(seq 1 60); do",
-            "  STATE=$(aws ec2 describe-volumes --volume-ids $VOLUME_ID --region $REGION \\",
-            "    --query 'Volumes[0].Attachments[0].State' --output text 2>/dev/null || echo 'none')",
-            '  if [ "$STATE" = "attached" ]; then',
-            '    echo "Volume attached successfully"',
-            "    break",
-            "  fi",
-            '  echo "Attachment state: $STATE — waiting..."',
-            "  sleep 5",
-            "done",
-            "",
-            "# Resolve actual device name (NVMe remapping)",
-            "sleep 3",
-            'DEVICE=""',
-            'for dev in /dev/nvme1n1 /dev/xvdf /dev/sdf; do',
-            "  if [ -b $dev ]; then",
-            "    DEVICE=$dev",
-            "    break",
-            "  fi",
-            "done",
-            "",
-            'if [ -z "$DEVICE" ]; then',
-            '  echo "ERROR: Could not find attached device"',
-            "  exit 1",
-            "fi",
-            'echo "Using device: $DEVICE"',
-            "",
-            "# --- Format if new volume ---",
-            'if [ "$FROM_SNAPSHOT" = "false" ]; then',
-            '  echo "Formatting new volume..."',
-            "  mkfs.ext4 -m 0 $DEVICE",
-            "fi",
-            "",
-            "# --- Mount ---",
-            "mkdir -p /data/comfyui",
-            "mount $DEVICE /data/comfyui",
-            "",
-            "# Create directory structure if fresh",
-            'if [ "$FROM_SNAPSHOT" = "false" ]; then',
-            "  mkdir -p /data/comfyui/{models/{checkpoints,clip,clip_vision,configs,controlnet,diffusers,embeddings,gligen,hypernetworks,loras,mmdets,onnx,sams,style_models,ultralytics,unet,upscale_models,vae,vae_approx},custom_nodes,output,input}",
-            "  chown -R 1000:1000 /data/comfyui",
-            "fi",
-            "",
-            "# --- Retrieve HuggingFace token ---",
-            'HF_TOKEN=$(aws ssm get-parameter --name "$HF_TOKEN_PARAM" --with-decryption \\',
-            "  --query 'Parameter.Value' --output text --region $REGION 2>/dev/null || echo 'not-set')",
-            "",
-            "# --- ECR login and pull ---",
-            'echo "Pulling ComfyUI Docker image..."',
-            "ECR_REGISTRY=$(echo $ECR_IMAGE | cut -d/ -f1)",
-            "aws ecr get-login-password --region $REGION | docker login --username AWS --password-stdin $ECR_REGISTRY",
-            "docker pull $ECR_IMAGE",
-            "",
-            "# --- Run ComfyUI container ---",
-            'echo "Starting ComfyUI container..."',
-            "docker run -d \\",
-            "  --name comfyui \\",
-            "  --gpus all \\",
-            "  --restart unless-stopped \\",
-            "  -v /data/comfyui/models:/home/user/opt/ComfyUI/models \\",
-            "  -v /data/comfyui/custom_nodes:/home/user/opt/ComfyUI/custom_nodes \\",
-            "  -v /data/comfyui/output:/home/user/opt/ComfyUI/output \\",
-            "  -v /data/comfyui/input:/home/user/opt/ComfyUI/input \\",
-            "  -e HF_TOKEN=$HF_TOKEN \\",
-            "  -p 8181:8181 \\",
-            "  $ECR_IMAGE",
-            "",
-            'echo "=== ComfyUI Bootstrap Complete ==="',
-        )
+        _userdata_path = os.path.join(os.path.dirname(__file__), "..", "scripts", "userdata.sh")
+        with open(_userdata_path) as _f:
+            _script = (
+                _f.read()
+                .replace("@@STACK_TAG@@", stack_tag_value)
+                .replace("@@VOLUME_SIZE@@", str(data_volume_size_gb))
+                .replace("@@ECR_IMAGE@@", docker_image_asset.image_uri)
+                .replace("@@HF_TOKEN_PARAM@@", hf_token_param_path)
+            )
+        user_data = ec2.UserData.custom(_script)
 
         # ------------------------------------------------------------------ #
         # Launch Template
@@ -329,6 +179,7 @@ class ComfyUISimpleStack(Stack):
         # ------------------------------------------------------------------ #
         launch_template = ec2.LaunchTemplate(
             self, "LaunchTemplate",
+            # no key_pair — SSM Session Manager is the sole access path
             machine_image=ec2.MachineImage.from_ssm_parameter(
                 # The top-level path returns a JSON blob; /image_id returns the bare AMI ID
                 "/aws/service/ecs/optimized-ami/amazon-linux-2/gpu/recommended/image_id",
@@ -384,7 +235,7 @@ class ComfyUISimpleStack(Stack):
             desired_capacity=1,
             auto_scaling_group_name=f"ComfyUI-ASG-{suffix}",
             new_instances_protected_from_scale_in=False,
-            vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PUBLIC),
+            vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
         )
 
         Tags.of(asg).add("Name", "ComfyUI-Host")
@@ -396,7 +247,6 @@ class ComfyUISimpleStack(Stack):
         asg.add_lifecycle_hook(
             "TerminationHook",
             lifecycle_transition=autoscaling.LifecycleTransition.INSTANCE_TERMINATING,
-            heartbeat_timeout=Duration.minutes(15),
             default_result=autoscaling.DefaultResult.CONTINUE,
         )
 
@@ -414,7 +264,7 @@ class ComfyUISimpleStack(Stack):
             runtime=lambda_.Runtime.PYTHON_3_12,
             handler="snapshot_handler.handler",
             code=lambda_.Code.from_asset("lambda"),
-            timeout=Duration.seconds(60),
+            timeout=Duration.seconds(900),
             log_group=snapshot_log_group,
             environment={
                 "STACK_ID": stack_tag_value,

@@ -5,14 +5,15 @@ Triggered by:
   1. ASG Lifecycle Hook (EC2_INSTANCE_TERMINATING) via EventBridge
   2. EC2 Spot Instance Interruption Warning via EventBridge
 
-Strategy: Initiate snapshot immediately and return. Do NOT wait for snapshot
-completion — the snapshot continues asynchronously in the background even after
-the instance is terminated. This avoids any risk of Lambda timeout.
+Strategy: Initiate snapshot immediately, then delete the source volume once it
+detaches (after instance termination). The snapshot continues asynchronously
+even after the volume is deleted.
 """
 
 import boto3
 import os
 import json
+import time
 from datetime import datetime, timezone
 
 ec2 = boto3.client("ec2")
@@ -60,6 +61,27 @@ def create_snapshot(volume_id: str, source: str) -> str:
     snapshot_id = resp["SnapshotId"]
     print(f"Snapshot initiated: {snapshot_id} from volume {volume_id} (source={source})")
     return snapshot_id
+
+
+def delete_volume(volume_id: str, max_wait_seconds: int = 900):
+    """Wait for volume to become available (detached), then delete it."""
+    print(f"Waiting for volume {volume_id} to detach before deleting...")
+    for i in range(0, max_wait_seconds, 10):
+        try:
+            resp = ec2.describe_volumes(VolumeIds=[volume_id])
+            state = resp["Volumes"][0]["State"]
+            if state == "available":
+                ec2.delete_volume(VolumeId=volume_id)
+                print(f"Deleted volume {volume_id}")
+                return
+            print(f"Volume {volume_id} state: {state} — waiting...")
+        except ec2.exceptions.ClientError as e:
+            if "InvalidVolume.NotFound" in str(e):
+                print(f"Volume {volume_id} already gone")
+                return
+            raise
+        time.sleep(10)
+    print(f"Timed out waiting for volume {volume_id} to detach — will be cleaned up on next boot")
 
 
 def prune_old_snapshots():
@@ -115,11 +137,15 @@ def handler(event, context):
         if volume_id:
             create_snapshot(volume_id, "lifecycle-hook")
             prune_old_snapshots()
+            # Complete lifecycle action first — this lets the instance terminate
+            # and the volume to auto-detach
+            complete_lifecycle_action(detail)
+            # Now wait for detach and delete the volume
+            delete_volume(volume_id)
         else:
             print(f"No comfyui-data volume found for instance {instance_id}")
+            complete_lifecycle_action(detail)
 
-        # Always complete the lifecycle action immediately — don't wait for snapshot
-        complete_lifecycle_action(detail)
         return {"statusCode": 200, "body": "Lifecycle snapshot initiated"}
 
     # --- Spot Interruption Warning ---
@@ -130,6 +156,8 @@ def handler(event, context):
         volume_id = find_data_volume(instance_id)
         if volume_id:
             create_snapshot(volume_id, "spot-interruption")
+            # Best-effort volume deletion — instance terminates in ~2 minutes
+            delete_volume(volume_id, max_wait_seconds=900)
         else:
             print(f"No comfyui-data volume found for instance {instance_id}")
 
