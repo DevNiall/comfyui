@@ -2,6 +2,10 @@
 FROM nvidia/cuda:13.1.1-devel-ubuntu24.04
 ENV DEBIAN_FRONTEND=noninteractive TZ=Europe/London
 
+LABEL org.opencontainers.image.title="ComfyUI" \
+    org.opencontainers.image.description="ComfyUI — GPU-accelerated generative AI image server" \
+    org.opencontainers.image.source="https://github.com/DevNiall/comfyui"
+
 # System packages — includes btop, tmux for monitoring/multiplexing
 RUN apt-get update && apt-get install -y \
     git make build-essential libssl-dev zlib1g-dev \
@@ -11,45 +15,41 @@ RUN apt-get update && apt-get install -y \
     cuda-nvcc-13-1 libcudart12 \
     libcusparse-dev-13-1 libcublas-dev-13-1 libcusolver-dev-13-1 \
     libcufft-dev-13-1 libcurand-dev-13-1 cuda-cudart-dev-13-1 \
-    btop tmux \
-    python3.12 python3.12-dev python3.12-venv python3-pip \
+    btop tmux python-is-python3 \
+    python3.12 python3.12-dev python3.12-venv \
     && rm -rf /var/lib/apt/lists/* \
     && git lfs install
 
-# Use existing non-root user from base image
-USER ubuntu
-ENV HOME=/home/ubuntu PATH=/home/ubuntu/.local/bin:$PATH
+# Rename the default ubuntu user → comfy (preserves UID/GID 1000)
+RUN usermod  -l comfy      ubuntu \
+    && usermod  -d /home/comfy -m comfy \
+    && groupmod -n comfy      ubuntu \
+    && mkdir -p /opt/comfyui \
+    && chown comfy:comfy /opt/comfyui
 
-# Python — Ubuntu 24.04 ships 3.12 natively; venv satisfies PEP 668
-RUN python3.12 -m venv /home/ubuntu/.venv
-ENV PATH=/home/ubuntu/.venv/bin:$PATH
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+USER comfy
+ENV HOME=/home/comfy \
+    PATH=/home/comfy/.venv/bin:/home/comfy/.local/bin:$PATH
 
-# PyTorch 2.9.1 — must match the Trellis2 Linux/Torch291 wheel ABI
-RUN pip install --no-cache-dir \
-    torch==2.9.1 torchvision torchaudio \
-    --index-url https://download.pytorch.org/whl/cu130
+WORKDIR /home/comfy
 
-# nvitop for GPU monitoring
-RUN pip install --no-cache-dir nvitop "rembg[gpu]"
+# Entrypoint — on first boot: clones ComfyUI into the EBS-backed /opt/comfyui,
+# creates a venv in /home/comfy/.venv and installs all packages, then seeds
+# declared plugins. Both volumes persist across reboots via EBS.
+# Subsequent boots skip all setup steps and start ComfyUI immediately.
+COPY --chown=comfy:comfy entrypoint.sh /home/comfy/entrypoint.sh
+RUN chmod +x /home/comfy/entrypoint.sh
 
-# ComfyUI
-WORKDIR /home/ubuntu/opt/ComfyUI
-RUN git clone --depth 1 https://github.com/comfyanonymous/ComfyUI . && \
-    pip install --no-cache-dir -r requirements.txt
-
-# Model paths config
-COPY extra_model_paths.yaml ./extra_model_paths.yaml
-
-# Entrypoint — seeds plugins declared in entrypoint.sh into the EBS-mounted
-# custom_nodes/ dir on first boot, then execs the CMD.
-COPY --chown=ubuntu:ubuntu entrypoint.sh ./entrypoint.sh
-RUN chmod +x ./entrypoint.sh
+# Model paths config — seeded into /opt/comfyui/ by the entrypoint on first clone
+COPY extra_model_paths.yaml /home/comfy/extra_model_paths.yaml
 
 EXPOSE 8181
 
-ENTRYPOINT ["./entrypoint.sh"]
-CMD ["python", "/home/ubuntu/opt/ComfyUI/main.py", \
-     "--listen", "0.0.0.0", \
-     "--port", "8181", \
-     "--output-directory", "/home/ubuntu/opt/ComfyUI/output/"]
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
+    CMD curl -f http://localhost:8181/ || exit 1
+
+ENTRYPOINT ["/home/comfy/entrypoint.sh"]
+CMD ["python", "/opt/comfyui/main.py", \
+    "--listen", "0.0.0.0", \
+    "--port", "8181", \
+    "--output-directory", "/opt/comfyui/output/"]

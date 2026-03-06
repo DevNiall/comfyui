@@ -1,23 +1,71 @@
 #!/usr/bin/env bash
-# entrypoint.sh — seed custom_nodes on the EBS-mounted volume at first boot,
-# then hand off to the CMD (ComfyUI main.py).
+# entrypoint.sh — on first boot:
+#   1. clones ComfyUI into the EBS-backed /opt/comfyui volume
+#   2. creates a Python venv in /home/comfy/.venv and installs all packages
+#   3. seeds declared plugins into /opt/comfyui/custom_nodes/
+# Subsequent boots skip steps 1–3 via idempotency guards and start immediately.
 #
-# Each entry in PLUGINS is "directory-name|git-url".
-# If the directory already contains a .git folder the clone is skipped,
-# making every subsequent container start a no-op for that plugin.
-#
-# To add a plugin: append a line to PLUGINS and redeploy.
+# To add a plugin: append a "directory-name|git-url" line to PLUGINS and redeploy.
 # Plugins installed via ComfyUI-Manager UI persist on EBS untouched.
 
 set -euo pipefail
 
-CUSTOM_NODES_DIR="$(dirname "$0")/custom_nodes"
+COMFYUI_DIR=/opt/comfyui
+VENV_DIR=/home/comfy/.venv
+CUSTOM_NODES_DIR=$COMFYUI_DIR/custom_nodes
+
+# --- 1. Ensure ComfyUI source exists on the persistent volume ---
+if [ -f "$COMFYUI_DIR/main.py" ]; then
+  echo "[entrypoint] ComfyUI source already present — skipping bootstrap"
+else
+  mkdir -p "$COMFYUI_DIR"
+  if [ -z "$(ls -A "$COMFYUI_DIR" 2>/dev/null)" ]; then
+    echo "[entrypoint] Cloning ComfyUI into empty $COMFYUI_DIR ..."
+    git clone --depth 1 https://github.com/comfyanonymous/ComfyUI "$COMFYUI_DIR"
+    echo "[entrypoint] ComfyUI cloned"
+  else
+    echo "[entrypoint] $COMFYUI_DIR is non-empty; bootstrapping ComfyUI files without deleting existing data ..."
+    TMP_CLONE_DIR="$(mktemp -d /tmp/comfyui-src.XXXXXX)"
+    git clone --depth 1 https://github.com/comfyanonymous/ComfyUI "$TMP_CLONE_DIR"
+    # Merge code into the persistent volume but preserve any existing files.
+    cp -an "$TMP_CLONE_DIR"/. "$COMFYUI_DIR"/
+    rm -rf "$TMP_CLONE_DIR"
+    echo "[entrypoint] ComfyUI source bootstrapped into existing volume"
+  fi
+fi
+
+if [ ! -f "$COMFYUI_DIR/extra_model_paths.yaml" ]; then
+  cp /home/comfy/extra_model_paths.yaml "$COMFYUI_DIR/extra_model_paths.yaml"
+fi
+
 mkdir -p "$CUSTOM_NODES_DIR"
 
+# --- 2. Python venv + packages (first boot only) ---
+if [ ! -f "$VENV_DIR/.pip_bootstrap_done" ]; then
+  echo "[entrypoint] Creating venv and installing packages ..."
+  python3.12 -m venv "$VENV_DIR"
+  pip install --no-cache-dir --upgrade pip setuptools wheel
+
+  # PyTorch 2.9.1 — must match the Trellis2 Linux/Torch291 wheel ABI
+  pip install --no-cache-dir \
+      torch==2.9.1 torchvision torchaudio \
+      --index-url https://download.pytorch.org/whl/cu130
+
+  pip install --no-cache-dir nvitop "rembg[gpu]"
+  pip install --no-cache-dir -r "$COMFYUI_DIR/requirements.txt"
+
+  touch "$VENV_DIR/.pip_bootstrap_done"
+  echo "[entrypoint] Package installation complete"
+else
+  echo "[entrypoint] Venv already bootstrapped — skipping pip install"
+fi
+
+# --- 3. Seed plugins (each clone is a no-op after first install) ---
+
 PLUGINS=(
-  "ComfyUI-Manager|https://github.com/Comfy-Org/ComfyUI-Manager"
-  "ComfyUI-Hunyuan3d-2-1|https://github.com/visualbruno/ComfyUI-Hunyuan3d-2-1"
-  "ComfyUI-Trellis2|https://github.com/visualbruno/ComfyUI-Trellis2"
+  # "ComfyUI-Manager|https://github.com/Comfy-Org/ComfyUI-Manager"
+  # "ComfyUI-Hunyuan3d-2-1|https://github.com/visualbruno/ComfyUI-Hunyuan3d-2-1"
+  # "ComfyUI-Trellis2|https://github.com/visualbruno/ComfyUI-Trellis2"
 )
 
 for entry in "${PLUGINS[@]}"; do
@@ -60,32 +108,6 @@ for entry in "${PLUGINS[@]}"; do
         pip install --no-cache-dir -r /dev/stdin || true
       pip install --no-cache-dir --no-build-isolation diso || true
     fi
-    # Patch: guard against None outputs in Hy3D21VAEDecode when marching cubes
-    # finds no isosurface, which causes AttributeError: 'NoneType'.mesh_f
-#     if [ "$name" = "ComfyUI-Hunyuan3d-2-1" ] && [ -f "$dest/nodes.py" ]; then
-#       NODES_PY="$dest/nodes.py" python3 - <<'PYEOF'
-# import os, re, pathlib
-# p = pathlib.Path(os.environ["NODES_PY"])
-# src = p.read_text()
-# # Guard against None when marching cubes finds no isosurface
-# pattern = r'(        if force_offload==True:\n            vae\.to\(offload_device\)\n\s*\n)(        outputs\.mesh_f = outputs\.mesh_f\[:, ::-1\])'
-# replacement = (
-#     r'\1'
-#     '        if outputs is None:\n'
-#     '            raise RuntimeError(\n'
-#     '                "VAE decode produced no mesh geometry. The latents may represent "\n'
-#     '                "a degenerate shape — try lowering mc_level or increasing octree_resolution."\n'
-#     '            )\n'
-#     r'\2'
-# )
-# patched, n = re.subn(pattern, replacement, src)
-# if n:
-#     p.write_text(patched)
-#     print("[entrypoint] Applied nodes.py None-outputs guard patch")
-# else:
-#     print("[entrypoint] WARNING: nodes.py patch target not found — skipping")
-# PYEOF
-#     fi
     echo "[entrypoint] $name installed"
   fi
 done

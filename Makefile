@@ -8,6 +8,19 @@ STACK_NAME     := ComfyUISimpleStack
 HF_TOKEN_PARAM := /comfyui/hf-token
 LOCAL_PORT     := 8181
 REMOTE_PORT    := 8181
+CONTAINER_NAME := comfyui
+ifeq ($(origin CONTAINER_IMAGE_TAG), undefined)
+CONTAINER_IMAGE_TAG := r$(shell date -u +%Y%m%d%H%M%S)
+endif
+
+# Target groups for categorized help output
+CDK_TARGETS          := bootstrap ensure-hf-token synth diff deploy destroy
+LIFECYCLE_TARGETS    := start status stop
+CONTAINER_TARGETS    := release-container
+CONNECTIVITY_TARGETS := comfyui tail-logs logs connect connect-container bootstrap-log diagnose
+SNAPSHOT_TARGETS     := list-snapshots snapshot
+TOKEN_TARGETS        := set-hf-token get-hf-token
+CLEANUP_TARGETS      := delete-volumes delete-snapshots nuke
 
 # Resolve region and profile
 REGION      := $(or $(AWS_DEFAULT_REGION),$(shell aws configure get region 2>/dev/null),eu-west-2)
@@ -24,6 +37,16 @@ STACK_TAG = $(shell aws cloudformation describe-stacks \
 	--stack-name $(STACK_NAME) \
 	--query 'Stacks[0].Outputs[?OutputKey==`StackTag`].OutputValue' \
 	--output text --region $(REGION) --profile $(AWS_PROFILE) 2>/dev/null)
+
+ECR_IMAGE_URI = $(shell aws cloudformation describe-stacks \
+	--stack-name $(STACK_NAME) \
+	--query 'Stacks[0].Outputs[?OutputKey==`ECRImageUri`].OutputValue' \
+	--output text --region $(REGION) --profile $(AWS_PROFILE) 2>/dev/null)
+
+ECR_REPO_URI = $(shell echo "$(ECR_IMAGE_URI)" | sed -E 's|:[^/:]+$$||')
+ECR_REGISTRY = $(shell echo "$(ECR_REPO_URI)" | cut -d/ -f1)
+ECR_REPO_NAME = $(shell echo "$(ECR_REPO_URI)" | cut -d/ -f2-)
+TARGET_IMAGE_URI = $(ECR_REPO_URI):$(CONTAINER_IMAGE_TAG)
 
 INSTANCE_ID = $(shell aws ec2 describe-instances \
 	--filters "Name=tag:Name,Values=ComfyUI-Host" \
@@ -124,6 +147,49 @@ status: ## Show instance, ASG, and snapshot status
 		--output table --region $(REGION) --profile $(AWS_PROFILE) 2>/dev/null || echo "No snapshots"
 
 # ============================================================================
+# Container Operations
+# ============================================================================
+
+.PHONY: release-container
+release-container: ## Build image, push to ECR, and restart ComfyUI on running instance (tag defaults to UTC timestamp)
+	@if [ -z "$(ECR_IMAGE_URI)" ] || [ "$(ECR_IMAGE_URI)" = "None" ]; then \
+		echo "❌ Could not resolve ECR image output from stack $(STACK_NAME). Is it deployed?"; \
+		exit 1; \
+	fi
+	@if [ -z "$(ECR_REGISTRY)" ]; then \
+		echo "❌ Could not resolve ECR registry from image URI: $(ECR_IMAGE_URI)"; \
+		exit 1; \
+	fi
+	@if aws ecr describe-images \
+		--repository-name "$(ECR_REPO_NAME)" \
+		--image-ids imageTag="$(CONTAINER_IMAGE_TAG)" \
+		--region $(REGION) --profile $(AWS_PROFILE) >/dev/null 2>&1; then \
+		echo "❌ ECR tag already exists and repository is immutable: $(CONTAINER_IMAGE_TAG)"; \
+		echo "   Use a new tag, e.g. make release-container CONTAINER_IMAGE_TAG=r$$(date -u +%Y%m%d%H%M%S)"; \
+		exit 1; \
+	fi
+	@if [ -z "$(INSTANCE_ID)" ]; then \
+		echo "❌ No running ComfyUI instance found. Run 'make start' first."; \
+		exit 1; \
+	fi
+	@set -euo pipefail; \
+	echo "🏗️  Building Docker image $(TARGET_IMAGE_URI) ..."; \
+	docker build -t "$(TARGET_IMAGE_URI)" docker; \
+	echo "🔐 Logging into ECR $(ECR_REGISTRY) ..."; \
+	aws ecr get-login-password --region $(REGION) --profile $(AWS_PROFILE) | docker login --username AWS --password-stdin "$(ECR_REGISTRY)"; \
+	echo "📤 Pushing $(TARGET_IMAGE_URI) ..."; \
+	docker push "$(TARGET_IMAGE_URI)"; \
+	echo "🚀 Updating container $(CONTAINER_NAME) on instance $(INSTANCE_ID) ..."; \
+	aws ssm start-session \
+		--target "$(INSTANCE_ID)" \
+		--document-name AWS-StartInteractiveCommand \
+		--parameters '{"command":["bash -lc \"set -euo pipefail; HF_TOKEN=$$(aws ssm get-parameter --name \\\"$(HF_TOKEN_PARAM)\\\" --with-decryption --query \\\"Parameter.Value\\\" --output text --region $(REGION) 2>/dev/null || echo not-set); aws ecr get-login-password --region $(REGION) | sudo docker login --username AWS --password-stdin \\\"$(ECR_REGISTRY)\\\"; sudo docker pull \\\"$(TARGET_IMAGE_URI)\\\"; sudo docker rm -f \\\"$(CONTAINER_NAME)\\\" 2>/dev/null || true; sudo docker run -d --name \\\"$(CONTAINER_NAME)\\\" --gpus all --restart unless-stopped --ipc=host -v /data/comfyui/app:/opt/comfyui -v /data/comfyui/venv:/home/comfy/.venv -e HF_TOKEN=\\\"$$HF_TOKEN\\\" -e MALLOC_ARENA_MAX=2 -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True -p $(REMOTE_PORT):8181 \\\"$(TARGET_IMAGE_URI)\\\"; RESULT=$$(sudo docker inspect --format '\''{{.Config.Image}}|{{.State.Running}}'\'' $(CONTAINER_NAME) 2>/dev/null || echo missing); if [ \\\"$$RESULT\\\" != \\\"$(TARGET_IMAGE_URI)|true\\\" ]; then echo \\\"Container verification failed: $$RESULT\\\"; exit 1; fi\""]}' \
+		--region $(REGION) --profile $(AWS_PROFILE)
+	@echo "✅ Updated $(CONTAINER_NAME) with $(CONTAINER_IMAGE_TAG)."
+
+niall:
+	echo "$(REGION)"
+# ============================================================================
 # Connectivity
 # ============================================================================
 
@@ -166,7 +232,20 @@ connect-container: ## Open a shell inside the ComfyUI Docker container via SSM
 		--region $(REGION) --profile $(AWS_PROFILE)
 
 .PHONY: logs
-logs: ## Tail ComfyUI container logs (works even if container has exited)
+logs: ## Show last 200 lines of ComfyUI container logs
+	@if [ -z "$(INSTANCE_ID)" ]; then \
+		echo "❌ No running ComfyUI instance found. Run 'make start' first."; \
+		exit 1; \
+	fi
+	@echo "📋 Last 200 lines from ComfyUI container logs..."
+	aws ssm start-session \
+		--target "$(INSTANCE_ID)" \
+		--document-name AWS-StartInteractiveCommand \
+		--parameters '{"command":["sudo docker logs --tail 200 comfyui 2>&1 || echo \"Container not found or never started\""]}' \
+		--region $(REGION) --profile $(AWS_PROFILE)
+
+.PHONY: tail-logs
+tail-logs: ## Tail ComfyUI container logs live (Ctrl+C to stop)
 	@if [ -z "$(INSTANCE_ID)" ]; then \
 		echo "❌ No running ComfyUI instance found. Run 'make start' first."; \
 		exit 1; \
@@ -308,11 +387,25 @@ nuke: delete-snapshots delete-volumes destroy ## Full teardown: snapshots + volu
 # Help
 # ============================================================================
 
+define PRINT_TARGET_GROUP
+	@echo "$(1)"
+	@for target in $(2); do \
+		desc=$$(grep -E "^$$target:.*## " $(MAKEFILE_LIST) | head -1 | sed -E 's/^[^#]*## //'); \
+		printf "  \033[36m%-20s\033[0m %s\n" "$$target" "$$desc"; \
+	done
+	@echo ""
+endef
+
 .PHONY: help
 help: ## Show this help
 	@echo "ComfyUI Simple — AWS Deployment"
 	@echo ""
 	@echo "Usage: make <target>"
 	@echo ""
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
-		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
+	$(call PRINT_TARGET_GROUP,CDK Operations,$(CDK_TARGETS))
+	$(call PRINT_TARGET_GROUP,Instance Lifecycle,$(LIFECYCLE_TARGETS))
+	$(call PRINT_TARGET_GROUP,Container Operations,$(CONTAINER_TARGETS))
+	$(call PRINT_TARGET_GROUP,Connectivity,$(CONNECTIVITY_TARGETS))
+	$(call PRINT_TARGET_GROUP,Snapshots,$(SNAPSHOT_TARGETS))
+	$(call PRINT_TARGET_GROUP,HuggingFace Token,$(TOKEN_TARGETS))
+	$(call PRINT_TARGET_GROUP,Cleanup,$(CLEANUP_TARGETS))

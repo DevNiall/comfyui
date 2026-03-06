@@ -1,5 +1,5 @@
 comfyui:
-  base_path: /home/user/opt/ComfyUI/
+  base_path: /opt/comfyui/
   checkpoints: models/checkpoints/
   clip: models/clip/
   clip_vision: models/clip_vision/

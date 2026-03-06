@@ -172,9 +172,22 @@ sysctl -w vm.overcommit_memory=1
 
 # Create directory structure if fresh
 if [ "$FROM_SNAPSHOT" = "false" ]; then
-  mkdir -p /data/comfyui/{models/{checkpoints,clip,clip_vision,configs,controlnet,diffusers,embeddings,gligen,hypernetworks,loras,mmdets,onnx,sams,style_models,ultralytics,unet,upscale_models,vae,vae_approx},custom_nodes,output,input}
-  chown -R 1000:1000 /data/comfyui
+  mkdir -p /data/comfyui/app/{models/{checkpoints,clip,clip_vision,configs,controlnet,diffusers,embeddings,gligen,hypernetworks,loras,mmdets,onnx,sams,style_models,ultralytics,unet,upscale_models,vae,vae_approx},custom_nodes,output,input} \
+           /data/comfyui/venv
 fi
+
+# --- Migrate data from pre-consolidation snapshot layout ---
+# Old layout stored models/custom_nodes/output/input as top-level dirs under
+# /data/comfyui/. New layout nests everything under /data/comfyui/app/.
+echo "Migrating any legacy top-level directories into /data/comfyui/app/ ..."
+mkdir -p /data/comfyui/app /data/comfyui/venv
+for dir in models custom_nodes output input; do
+  if [ -d "/data/comfyui/$dir" ] && [ ! -d "/data/comfyui/app/$dir" ]; then
+    echo "  Moving /data/comfyui/$dir -> /data/comfyui/app/$dir"
+    mv "/data/comfyui/$dir" "/data/comfyui/app/$dir"
+  fi
+done
+chown -R 1000:1000 /data/comfyui/app /data/comfyui/venv
 
 # --- Retrieve HuggingFace token ---
 HF_TOKEN=$(aws ssm get-parameter --name "$HF_TOKEN_PARAM" --with-decryption \
@@ -193,10 +206,8 @@ docker run -d \
   --gpus all \
   --restart unless-stopped \
   --ipc=host \
-  -v /data/comfyui/models:/home/user/opt/ComfyUI/models \
-  -v /data/comfyui/custom_nodes:/home/user/opt/ComfyUI/custom_nodes \
-  -v /data/comfyui/output:/home/user/opt/ComfyUI/output \
-  -v /data/comfyui/input:/home/user/opt/ComfyUI/input \
+  -v /data/comfyui/app:/opt/comfyui \
+  -v /data/comfyui/venv:/home/comfy/.venv \
   -e HF_TOKEN=$HF_TOKEN \
   -e MALLOC_ARENA_MAX=2 \
   -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
