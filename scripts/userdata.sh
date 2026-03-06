@@ -5,10 +5,10 @@ exec > >(tee /var/log/comfyui-bootstrap.log) 2>&1
 export PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH
 echo "=== ComfyUI Bootstrap Starting ==="
 
-# Install AWS CLI v2 if not present (ECS GPU AMI ships without it)
+# Install AWS CLI v2 if not present (DL Base AMI ships without it)
 if ! command -v aws &>/dev/null; then
   echo "AWS CLI not found — installing AWS CLI v2..."
-  yum install -y unzip
+  dnf install -y unzip
   curl -fsSL 'https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip' -o /tmp/awscliv2.zip
   unzip -q /tmp/awscliv2.zip -d /tmp/awscliv2
   /tmp/awscliv2/aws/install --bin-dir /usr/local/bin --install-dir /usr/local/aws-cli --update
@@ -16,9 +16,8 @@ if ! command -v aws &>/dev/null; then
   echo "AWS CLI v2 installed: $(aws --version)"
 fi
 
-# Stop ECS agent — we run Docker directly
-systemctl stop ecs 2>/dev/null || true
-systemctl disable ecs 2>/dev/null || true
+# Ensure Docker is running (DL Base AMI has Docker pre-installed but may need a start)
+systemctl enable --now docker 2>/dev/null || true
 
 # Metadata
 TOKEN=$(curl -sX PUT 'http://169.254.169.254/latest/api/token' -H 'X-aws-ec2-metadata-token-ttl-seconds: 300')
@@ -150,6 +149,27 @@ fi
 mkdir -p /data/comfyui
 mount $DEVICE /data/comfyui
 
+# --- Swap (32 GB on EBS data volume) ---
+# File is placed on the data volume so it persists across snapshot restores.
+# The guard + swapon '|| true' make this idempotent on subsequent boots.
+SWAPFILE=/data/comfyui/.swapfile
+if [ ! -f "$SWAPFILE" ]; then
+  echo "Creating 32 GB swap file..."
+  fallocate -l 32G "$SWAPFILE"
+  chmod 600 "$SWAPFILE"
+  mkswap "$SWAPFILE"
+fi
+swapon "$SWAPFILE" 2>/dev/null || true
+echo "Swap enabled: $(swapon --show)"
+
+# Kernel memory tunables for large ML model loading
+# vm.swappiness=10:       strongly prefer physical RAM, only use swap as overflow
+# vm.overcommit_memory=1: allow malloc to succeed even when physical RAM is low;
+#                          without this, the kernel may refuse a large allocation
+#                          pre-emptively even though swap would cover it.
+sysctl -w vm.swappiness=10
+sysctl -w vm.overcommit_memory=1
+
 # Create directory structure if fresh
 if [ "$FROM_SNAPSHOT" = "false" ]; then
   mkdir -p /data/comfyui/{models/{checkpoints,clip,clip_vision,configs,controlnet,diffusers,embeddings,gligen,hypernetworks,loras,mmdets,onnx,sams,style_models,ultralytics,unet,upscale_models,vae,vae_approx},custom_nodes,output,input}
@@ -172,11 +192,14 @@ docker run -d \
   --name comfyui \
   --gpus all \
   --restart unless-stopped \
+  --ipc=host \
   -v /data/comfyui/models:/home/user/opt/ComfyUI/models \
   -v /data/comfyui/custom_nodes:/home/user/opt/ComfyUI/custom_nodes \
   -v /data/comfyui/output:/home/user/opt/ComfyUI/output \
   -v /data/comfyui/input:/home/user/opt/ComfyUI/input \
   -e HF_TOKEN=$HF_TOKEN \
+  -e MALLOC_ARENA_MAX=2 \
+  -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
   -p 8181:8181 \
   $ECR_IMAGE
 

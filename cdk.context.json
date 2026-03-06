@@ -83,5 +83,6 @@
         ]
       }
     ]
-  }
+  },
+  "ami:account=237518208051:filters.image-type.0=machine:filters.name.0=Deep Learning Base OSS Nvidia Driver GPU AMI (Amazon Linux 2023) *:filters.state.0=available:owners.0=amazon:region=eu-west-2": "ami-0ba91b27432ca0d0e"
 }

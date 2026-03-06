@@ -17,6 +17,7 @@ mkdir -p "$CUSTOM_NODES_DIR"
 PLUGINS=(
   "ComfyUI-Manager|https://github.com/Comfy-Org/ComfyUI-Manager"
   "ComfyUI-Hunyuan3d-2-1|https://github.com/visualbruno/ComfyUI-Hunyuan3d-2-1"
+  "ComfyUI-Trellis2|https://github.com/visualbruno/ComfyUI-Trellis2"
 )
 
 for entry in "${PLUGINS[@]}"; do
@@ -29,13 +30,34 @@ for entry in "${PLUGINS[@]}"; do
   else
     echo "[entrypoint] Installing $name from $url ..."
     git clone --depth 1 "$url" "$dest"
+    # Trellis2 ships pre-built CUDA wheels that must be installed BEFORE
+    # requirements.txt, because o_voxel's metadata declares cumesh via a git URL
+    # which conflicts with the local .whl even though both are v0.0.1.
+    # Fix: install cumesh wheel first so pip sees it satisfied, then install
+    # o_voxel with --no-deps to skip its conflicting git-sourced requirement.
+    if [ "$name" = "ComfyUI-Trellis2" ]; then
+      WHEELS_DIR="$dest/wheels/Linux/Torch291"
+      if [ -d "$WHEELS_DIR" ]; then
+        echo "[entrypoint] Installing Trellis2 wheels from $WHEELS_DIR ..."
+        pip install --no-cache-dir "$WHEELS_DIR"/cumesh-*.whl
+        pip install --no-cache-dir --no-deps "$WHEELS_DIR"/o_voxel-*.whl
+        for whl in "$WHEELS_DIR"/*.whl; do
+          case "$(basename "$whl")" in
+            cumesh-*|o_voxel-*) continue ;;
+          esac
+          pip install --no-cache-dir "$whl" || true
+        done
+        echo "[entrypoint] Trellis2 wheels installed"
+      else
+        echo "[entrypoint] WARNING: $WHEELS_DIR not found — skipping Trellis2 wheels"
+      fi
+    fi
+
     if [ -f "$dest/requirements.txt" ]; then
-      # Install most requirements normally; packages that inspect torch at build
-      # time (e.g. diso) must be excluded here and installed separately below.
-      grep -v -E '^\s*diso\b' "$dest/requirements.txt" | \
+      # Exclude packages already satisfied by the Trellis2 wheels above, plus
+      # diso which must be built against the installed torch (no-build-isolation).
+      grep -v -E '^\s*(diso|cumesh|o.?voxel|nvdiffrast|flex.?gemm|nvdiffrec)\b' "$dest/requirements.txt" | \
         pip install --no-cache-dir -r /dev/stdin || true
-      # diso builds a CUDA extension and calls `import torch` during setup.py,
-      # so it must see the already-installed torch — use --no-build-isolation.
       pip install --no-cache-dir --no-build-isolation diso || true
     fi
     # Patch: guard against None outputs in Hy3D21VAEDecode when marching cubes

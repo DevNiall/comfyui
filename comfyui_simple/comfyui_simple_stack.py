@@ -42,7 +42,7 @@ class ComfyUISimpleStack(Stack):
         scope: Construct,
         construct_id: str,
         # Instance config
-        instance_type: str = "g4dn.2xlarge",
+        instance_type: str = "g6.2xlarge",
         fallback_instance_types: List[str] = None,
         spot_max_price: str = "1.20",
         # Data volume
@@ -59,7 +59,7 @@ class ComfyUISimpleStack(Stack):
         super().__init__(scope, construct_id, **kwargs)
 
         if fallback_instance_types is None:
-            fallback_instance_types = ["g6.2xlarge", "g6.xlarge", "g5.2xlarge", "g5.xlarge", "g4dn.xlarge"]
+            fallback_instance_types = ["g4dn.2xlarge", "g6.xlarge", "g5.2xlarge", "g5.xlarge", "g4dn.xlarge"]
 
         # Unique suffix for resource naming
         unique_input = f"{self.account}-{self.region}-{self.stack_name}"
@@ -175,15 +175,16 @@ class ComfyUISimpleStack(Stack):
 
         # ------------------------------------------------------------------ #
         # Launch Template
-        # ECS GPU-optimized AMI: Docker + NVIDIA drivers pre-installed
+        # Deep Learning Base OSS Nvidia Driver AMI (AL2023):
+        # ships with driver 570.x+ which supports CUDA 13.1.
+        # Includes Docker + nvidia-container-toolkit pre-installed.
         # ------------------------------------------------------------------ #
         launch_template = ec2.LaunchTemplate(
             self, "LaunchTemplate",
             # no key_pair — SSM Session Manager is the sole access path
-            machine_image=ec2.MachineImage.from_ssm_parameter(
-                # The top-level path returns a JSON blob; /image_id returns the bare AMI ID
-                "/aws/service/ecs/optimized-ami/amazon-linux-2/gpu/recommended/image_id",
-                os=ec2.OperatingSystemType.LINUX,
+            machine_image=ec2.MachineImage.lookup(
+                name="Deep Learning Base OSS Nvidia Driver GPU AMI (Amazon Linux 2023) *",
+                owners=["amazon"],
             ),
             instance_type=ec2.InstanceType(instance_type),
             role=ec2_role,
