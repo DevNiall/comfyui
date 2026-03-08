@@ -63,7 +63,7 @@ fi
 # --- 3. Seed plugins (each clone is a no-op after first install) ---
 
 PLUGINS=(
-  # "ComfyUI-Manager|https://github.com/Comfy-Org/ComfyUI-Manager"
+  "ComfyUI-Manager|https://github.com/Comfy-Org/ComfyUI-Manager"
   # "ComfyUI-Hunyuan3d-2-1|https://github.com/visualbruno/ComfyUI-Hunyuan3d-2-1"
   # "ComfyUI-Trellis2|https://github.com/visualbruno/ComfyUI-Trellis2"
 )
@@ -104,7 +104,7 @@ for entry in "${PLUGINS[@]}"; do
     if [ -f "$dest/requirements.txt" ]; then
       # Exclude packages already satisfied by the Trellis2 wheels above, plus
       # diso which must be built against the installed torch (no-build-isolation).
-      grep -v -E '^\s*(diso|cumesh|o.?voxel|nvdiffrast|flex.?gemm|nvdiffrec)\b' "$dest/requirements.txt" | \
+      # grep -v -E '^\s*(diso|cumesh|o.?voxel|nvdiffrast|flex.?gemm|nvdiffrec)\b' "$dest/requirements.txt" | \
         pip install --no-cache-dir -r /dev/stdin || true
       pip install --no-cache-dir --no-build-isolation diso || true
     fi

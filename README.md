@@ -14,7 +14,7 @@ This implementation simplifies the original AWS sample by:
 - **No Amazon Cognito** — No authentication layer (suitable for personal/development use)
 - **No AWS WAF** — Simplified security model for single-user scenarios
 - **No ECS Service/Task Definitions** — ComfyUI runs directly in Docker on EC2 (ECS agent is disabled)
-- **Existing VPC support** — Uses your existing default VPC (configurable in `app.py`)
+- **Existing VPC support** — Uses your existing default VPC (configurable in `.env`)
 - **Streamlined snapshots** — Three-tiered strategy: periodic (DLM), termination hooks, and manual snapshots
 - **Makefile-driven operations** — All common tasks accessible via simple `make` commands
 
@@ -89,7 +89,7 @@ This deployment leverages the following AWS services:
   Check [Service Quotas](https://console.aws.amazon.com/servicequotas/home/services/ec2/quotas/L-3819A6DF) and set `All G and VT Spot Instance Requests` to at least 4 vCPUs
 - **HuggingFace token** stored in SSM Parameter Store — must be created **before** deploying the stack  
   Run `make set-hf-token` to store your token securely
-- **VPC** — Uses your existing default VPC by default (configurable in `app.py` — set `vpc_id=None` to create a new VPC)
+- **VPC** — Uses your existing VPC by default (configurable via `.env` / `.env.<AWS_PROFILE>`)
 
 ## Quick Start
 
@@ -98,17 +98,23 @@ This deployment leverages the following AWS services:
 pip install -r requirements.txt
 npm install
 
-# 2. Bootstrap CDK (one-time per account/region)
+# 2. Create local configuration from template
+cp .env.example .env
+
+# 3. (Optional) add profile-specific overrides, e.g. for AWS_PROFILE=dev
+cp .env.example .env.dev
+
+# 4. Bootstrap CDK (one-time per account/region)
 make bootstrap
 
-# 3. Store your HuggingFace token (required before deployment)
+# 5. Store your HuggingFace token (required before deployment)
 #    Creates an encrypted SecureString in SSM Parameter Store
 make set-hf-token
 
-# 4. Deploy
+# 6. Deploy
 make deploy
 
-# 5. Access ComfyUI in your browser at http://localhost:8181
+# 7. Access ComfyUI in your browser at http://localhost:8181
 make comfyui
 ```
 
@@ -116,32 +122,44 @@ On first deploy, an empty 500 GB data volume is created and the directory struct
 
 ## Configuration
 
-Edit `app.py` to customise the stack before deploying:
+Configuration now comes from environment variables and dotenv files.
 
-| Parameter | Default | Description |
+Precedence is:
+1. Shell environment variables
+2. `.env.<AWS_PROFILE>`
+3. `.env`
+4. Defaults in `app.py`
+
+Supported keys in `.env` / `.env.<AWS_PROFILE>`:
+
+| Key | Default | Description |
 |---|---|---|
-| `instance_type` | `g6.2xlarge` | Primary GPU instance type (NVIDIA L4, 1 GPU, 4 vCPU, 16 GiB RAM) |
-| `fallback_instance_types` | `g5.2xlarge`, `g6.xlarge`, `g5.xlarge` | Spot fallback pool for availability |
-| `spot_max_price` | `1.20` | Maximum Spot price (USD/hr) — set higher if frequently interrupted |
-| `data_volume_size_gb` | `500` | EBS data volume size (GB) — adjust based on model storage needs |
-| `snapshot_interval_hours` | `12` | DLM periodic snapshot interval (hours) |
-| `snapshot_retain_count` | `3` | Number of lifecycle/spot/DLM snapshots to retain |
-| `hf_token_param_path` | `/comfyui/hf-token` | SSM Parameter Store path for HuggingFace token |
-| `vpc_id` | `vpc-0a0078c96978cb8bb` | Existing VPC ID (set to `None` to create a new single-AZ public VPC) |
+| `AWS_PROFILE` | `default` | AWS profile and profile-specific dotenv selector |
+| `CDK_DEFAULT_ACCOUNT` | none | Target AWS account for CDK deploy (required) |
+| `CDK_DEFAULT_REGION` | none | Target AWS region for CDK deploy (required) |
+| `INSTANCE_TYPE` | `g6.2xlarge` | Primary GPU instance type |
+| `FALLBACK_INSTANCE_TYPES` | stack defaults | Comma-separated fallback spot instance types |
+| `SPOT_MAX_PRICE` | `1.20` | Maximum Spot price (USD/hr) |
+| `DATA_VOLUME_SIZE_GB` | `500` | EBS data volume size in GB |
+| `SNAPSHOT_INTERVAL_HOURS` | `12` | DLM periodic snapshot interval in hours |
+| `SNAPSHOT_RETAIN_COUNT` | `3` | Number of snapshots retained |
+| `HF_TOKEN_PARAM` | `/comfyui/hf-token` | SSM parameter path for HuggingFace token |
+| `VPC_ID` | `vpc-0a0078c96978cb8bb` | VPC ID to deploy into |
 
-**Example customization** in `app.py`:
+**Example profile-specific overrides** (`.env.dev`):
 
-```python
-ComfyUISimpleStack(
-    app,
-    "ComfyUISimpleStack",
-    # ... other parameters ...
-    instance_type="g5.xlarge",           # Use smaller/cheaper instance
-    data_volume_size_gb=1000,            # Increase storage for more models
-    snapshot_interval_hours=6,           # Snapshot every 6 hours
-    vpc_id=None,                         # Create a new VPC instead
-)
+```bash
+AWS_PROFILE=dev
+CDK_DEFAULT_ACCOUNT=123456789012
+CDK_DEFAULT_REGION=eu-west-2
+INSTANCE_TYPE=g5.xlarge
+DATA_VOLUME_SIZE_GB=1000
+SNAPSHOT_INTERVAL_HOURS=6
+HF_TOKEN_PARAM=/comfyui-dev/hf-token
+VPC_ID=vpc-0123456789abcdef0
 ```
+
+When you run commands with `AWS_PROFILE=dev`, Makefile and CDK will automatically load `.env.dev`.
 
 ### GPU Instance Type Reference
 
@@ -265,7 +283,7 @@ This deployment is designed for **personal/development use** with a simplified s
 
 1. **No Authentication** — Unlike the reference implementation, this deployment has no Cognito/ALB authentication layer. Anyone with AWS console access and appropriate IAM permissions can access the instance via SSM.
 
-2. **VPC Configuration** — By default, uses your existing VPC. If security is critical, create a dedicated VPC (set `vpc_id=None` in `app.py`).
+2. **VPC Configuration** — By default, uses your existing VPC. If security is critical, set `VPC_ID` to a dedicated VPC in `.env`.
 
 3. **HuggingFace Token** — Stored as an SSM SecureString parameter (encrypted at rest with AWS KMS). The EC2 instance retrieves it at boot time.
 
@@ -559,13 +577,13 @@ For non-production personal use with Spot instances and periodic usage:
 2. **Use smaller instances** — For testing/development, consider `g6.xlarge` or `g5.xlarge`
 3. **Reduce snapshot frequency** — Adjust `snapshot_interval_hours` to 24 or 48 hours for less critical workloads
 4. **Clean up old snapshots** — Run `make list-snapshots` and manually delete old snapshots via AWS Console
-5. **Monitor Spot interruptions** — If frequently interrupted, adjust `spot_max_price` or switch to On-Demand (remove Spot configuration in `app.py`)
+5. **Monitor Spot interruptions** — If frequently interrupted, adjust `SPOT_MAX_PRICE` or switch to On-Demand (modify the ASG Spot settings in `comfyui_simple/comfyui_simple_stack.py`)
 
 ## Repository Structure
 
 ```
 .
-├── app.py                          # CDK app entry point — customize deployment parameters here
+├── app.py                          # CDK app entry point — reads .env and .env.<AWS_PROFILE>
 ├── cdk.json                        # CDK configuration
 ├── requirements.txt                # Python CDK dependencies
 ├── package.json                    # Node.js CDK CLI dependencies

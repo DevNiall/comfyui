@@ -9,3 +9,6 @@ build
 cdk.out
 .cdk.staging
 node_modules
+.env
+.env.*
+!.env.example

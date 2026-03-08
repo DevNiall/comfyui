@@ -4,11 +4,62 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
-STACK_NAME     := ComfyUISimpleStack
-HF_TOKEN_PARAM := /comfyui/hf-token
-LOCAL_PORT     := 8181
-REMOTE_PORT    := 8181
-CONTAINER_NAME := comfyui
+# Capture shell-provided values so they keep precedence over .env files.
+ENV_STACK_NAME := $(STACK_NAME)
+ENV_HF_TOKEN_PARAM := $(HF_TOKEN_PARAM)
+ENV_LOCAL_PORT := $(LOCAL_PORT)
+ENV_REMOTE_PORT := $(REMOTE_PORT)
+ENV_CONTAINER_NAME := $(CONTAINER_NAME)
+ENV_AWS_PROFILE := $(AWS_PROFILE)
+ENV_AWS_DEFAULT_REGION := $(AWS_DEFAULT_REGION)
+ENV_CDK_DEFAULT_ACCOUNT := $(CDK_DEFAULT_ACCOUNT)
+ENV_CDK_DEFAULT_REGION := $(CDK_DEFAULT_REGION)
+ENV_INSTANCE_TYPE := $(INSTANCE_TYPE)
+ENV_FALLBACK_INSTANCE_TYPES := $(FALLBACK_INSTANCE_TYPES)
+ENV_SPOT_MAX_PRICE := $(SPOT_MAX_PRICE)
+ENV_DATA_VOLUME_SIZE_GB := $(DATA_VOLUME_SIZE_GB)
+ENV_SNAPSHOT_INTERVAL_HOURS := $(SNAPSHOT_INTERVAL_HOURS)
+ENV_SNAPSHOT_RETAIN_COUNT := $(SNAPSHOT_RETAIN_COUNT)
+ENV_VPC_ID := $(VPC_ID)
+
+-include .env
+AWS_PROFILE := $(or $(ENV_AWS_PROFILE),$(AWS_PROFILE),default)
+-include .env.$(AWS_PROFILE)
+AWS_PROFILE := $(or $(ENV_AWS_PROFILE),$(AWS_PROFILE),default)
+
+STACK_NAME := $(or $(ENV_STACK_NAME),$(STACK_NAME),ComfyUISimpleStack)
+HF_TOKEN_PARAM := $(or $(ENV_HF_TOKEN_PARAM),$(HF_TOKEN_PARAM),/comfyui/hf-token)
+LOCAL_PORT := $(or $(ENV_LOCAL_PORT),$(LOCAL_PORT),8181)
+REMOTE_PORT := $(or $(ENV_REMOTE_PORT),$(REMOTE_PORT),8181)
+CONTAINER_NAME := $(or $(ENV_CONTAINER_NAME),$(CONTAINER_NAME),comfyui)
+AWS_DEFAULT_REGION := $(or $(ENV_AWS_DEFAULT_REGION),$(AWS_DEFAULT_REGION),$(shell aws configure get region --profile $(AWS_PROFILE) 2>/dev/null),eu-west-2)
+REGION := $(AWS_DEFAULT_REGION)
+CDK_DEFAULT_ACCOUNT := $(or $(ENV_CDK_DEFAULT_ACCOUNT),$(CDK_DEFAULT_ACCOUNT))
+CDK_DEFAULT_REGION := $(or $(ENV_CDK_DEFAULT_REGION),$(CDK_DEFAULT_REGION),$(AWS_DEFAULT_REGION))
+INSTANCE_TYPE := $(or $(ENV_INSTANCE_TYPE),$(INSTANCE_TYPE))
+FALLBACK_INSTANCE_TYPES := $(or $(ENV_FALLBACK_INSTANCE_TYPES),$(FALLBACK_INSTANCE_TYPES))
+SPOT_MAX_PRICE := $(or $(ENV_SPOT_MAX_PRICE),$(SPOT_MAX_PRICE))
+DATA_VOLUME_SIZE_GB := $(or $(ENV_DATA_VOLUME_SIZE_GB),$(DATA_VOLUME_SIZE_GB))
+SNAPSHOT_INTERVAL_HOURS := $(or $(ENV_SNAPSHOT_INTERVAL_HOURS),$(SNAPSHOT_INTERVAL_HOURS))
+SNAPSHOT_RETAIN_COUNT := $(or $(ENV_SNAPSHOT_RETAIN_COUNT),$(SNAPSHOT_RETAIN_COUNT))
+VPC_ID := $(or $(ENV_VPC_ID),$(VPC_ID))
+
+export AWS_PROFILE
+export AWS_DEFAULT_REGION
+export CDK_DEFAULT_ACCOUNT
+export CDK_DEFAULT_REGION
+export STACK_NAME
+export LOCAL_PORT
+export REMOTE_PORT
+export CONTAINER_NAME
+export INSTANCE_TYPE
+export FALLBACK_INSTANCE_TYPES
+export SPOT_MAX_PRICE
+export DATA_VOLUME_SIZE_GB
+export SNAPSHOT_INTERVAL_HOURS
+export SNAPSHOT_RETAIN_COUNT
+export HF_TOKEN_PARAM
+export VPC_ID
 ifeq ($(origin CONTAINER_IMAGE_TAG), undefined)
 CONTAINER_IMAGE_TAG := r$(shell date -u +%Y%m%d%H%M%S)
 endif
@@ -16,15 +67,12 @@ endif
 # Target groups for categorized help output
 CDK_TARGETS          := bootstrap ensure-hf-token synth diff deploy destroy
 LIFECYCLE_TARGETS    := start status stop
-CONTAINER_TARGETS    := release-container
+CONTAINER_TARGETS    := release-container restart-container
 CONNECTIVITY_TARGETS := comfyui tail-logs logs connect connect-container bootstrap-log diagnose
 SNAPSHOT_TARGETS     := list-snapshots snapshot
 TOKEN_TARGETS        := set-hf-token get-hf-token
 CLEANUP_TARGETS      := delete-volumes delete-snapshots nuke
 
-# Resolve region and profile
-REGION      := $(or $(AWS_DEFAULT_REGION),$(shell aws configure get region 2>/dev/null),eu-west-2)
-AWS_PROFILE := $(or $(AWS_PROFILE),default)
 $(info AWS Profile : $(AWS_PROFILE)  |  Region : $(REGION))
 
 # Dynamic lookups (lazy evaluation)
@@ -84,24 +132,24 @@ ensure-hf-token: ## Check HF token SSM parameter exists (prerequisite for deploy
 .PHONY: deploy
 deploy: ensure-hf-token ## Deploy the ComfyUI stack (requires HF token — run set-hf-token first)
 	@echo "🚀 Deploying $(STACK_NAME)..."
-	npx cdk deploy --require-approval never
+	npx cdk deploy --require-approval never --profile $(AWS_PROFILE)
 
 .PHONY: destroy
 destroy: ## Destroy the ComfyUI stack (data volumes/snapshots preserved)
 	@echo "💥 Destroying $(STACK_NAME)..."
-	npx cdk destroy --force
+	npx cdk destroy --force --profile $(AWS_PROFILE)
 
 .PHONY: synth
 synth: ## Synthesize the CloudFormation template
-	npx cdk synth
+	npx cdk synth --profile $(AWS_PROFILE)
 
 .PHONY: diff
 diff: ## Show pending infrastructure changes
-	npx cdk diff
+	npx cdk diff --profile $(AWS_PROFILE)
 
 .PHONY: bootstrap
 bootstrap: ## Bootstrap CDK in your AWS account/region
-	npx cdk bootstrap
+	npx cdk bootstrap --profile $(AWS_PROFILE)
 
 # ============================================================================
 # Instance Lifecycle
@@ -187,8 +235,20 @@ release-container: ## Build image, push to ECR, and restart ComfyUI on running i
 		--region $(REGION) --profile $(AWS_PROFILE)
 	@echo "✅ Updated $(CONTAINER_NAME) with $(CONTAINER_IMAGE_TAG)."
 
-niall:
-	echo "$(REGION)"
+.PHONY: restart-container
+restart-container: ## Restart ComfyUI container on running instance
+	@if [ -z "$(INSTANCE_ID)" ]; then \
+		echo "❌ No running ComfyUI instance found. Run 'make start' first."; \
+		exit 1; \
+	fi
+	@echo "🔄 Restarting container $(CONTAINER_NAME) on $(INSTANCE_ID)..."
+	aws ssm start-session \
+		--target "$(INSTANCE_ID)" \
+		--document-name AWS-StartInteractiveCommand \
+		--parameters '{"command":["bash -lc \"set -euo pipefail; sudo docker restart \\\"$(CONTAINER_NAME)\\\" >/dev/null; RUNNING=$$(sudo docker inspect --format '\''{{.State.Running}}'\'' $(CONTAINER_NAME) 2>/dev/null || echo false); if [ \\\"$$RUNNING\\\" != \\\"true\\\" ]; then echo \\\"Container is not running after restart\\\"; exit 1; fi; echo restarted\""]}' \
+		--region $(REGION) --profile $(AWS_PROFILE)
+	@echo "✅ Container $(CONTAINER_NAME) restarted."
+
 # ============================================================================
 # Connectivity
 # ============================================================================
