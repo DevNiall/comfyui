@@ -139,7 +139,7 @@ Supported keys in `.env` / `.env.<AWS_PROFILE>`:
 | `CDK_DEFAULT_REGION` | none | Target AWS region for CDK deploy (required) |
 | `INSTANCE_TYPE` | `g6.2xlarge` | Primary GPU instance type |
 | `FALLBACK_INSTANCE_TYPES` | stack defaults | Comma-separated fallback spot instance types |
-| `SPOT_MAX_PRICE` | `1.20` | Maximum Spot price (USD/hr) |
+| `SPOT_MAX_PRICE` | `1.20` | Maximum Spot price (USD/hr), uncapped if ommitted |
 | `DATA_VOLUME_SIZE_GB` | `500` | EBS data volume size in GB |
 | `SNAPSHOT_INTERVAL_HOURS` | `12` | DLM periodic snapshot interval in hours |
 | `SNAPSHOT_RETAIN_COUNT` | `3` | Number of snapshots retained |

@@ -64,7 +64,7 @@ ComfyUISimpleStack(
     },
     instance_type=str(config.get("INSTANCE_TYPE", "g6.2xlarge")),
     fallback_instance_types=_list_config(config, "FALLBACK_INSTANCE_TYPES"),
-    spot_max_price=str(config.get("SPOT_MAX_PRICE", "1.20")),
+    spot_max_price=config.get("SPOT_MAX_PRICE") or None,
     data_volume_size_gb=_int_config(config, "DATA_VOLUME_SIZE_GB", 500),
     snapshot_interval_hours=_int_config(config, "SNAPSHOT_INTERVAL_HOURS", 12),
     snapshot_retain_count=_int_config(config, "SNAPSHOT_RETAIN_COUNT", 3),

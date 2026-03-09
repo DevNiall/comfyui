@@ -44,6 +44,7 @@ class ComfyUISimpleStack(Stack):
         # Instance config
         instance_type: str = "g6.2xlarge",
         fallback_instance_types: List[str] = None,
+        spot_max_price: str = None,
         # Data volume
         data_volume_size_gb: int = 500,
         # Snapshots
@@ -228,8 +229,8 @@ class ComfyUISimpleStack(Stack):
                     on_demand_base_capacity=0,
                     on_demand_percentage_above_base_capacity=0,
                     on_demand_allocation_strategy=autoscaling.OnDemandAllocationStrategy.LOWEST_PRICE,
-                    spot_allocation_strategy=autoscaling.SpotAllocationStrategy.LOWEST_PRICE,
-                    spot_instance_pools=1,
+                    spot_allocation_strategy=autoscaling.SpotAllocationStrategy.PRICE_CAPACITY_OPTIMIZED,
+                    **({"spot_max_price": spot_max_price} if spot_max_price else {}),
                 ),
                 launch_template=launch_template,
                 launch_template_overrides=lt_overrides,
