@@ -69,7 +69,7 @@ endif
 
 # Target groups for categorized help output
 CDK_TARGETS          := bootstrap ensure-hf-token synth diff deploy destroy
-LIFECYCLE_TARGETS    := start status stop
+LIFECYCLE_TARGETS    := start start-on-demand status stop
 CONTAINER_TARGETS    := release-container restart-container
 CONNECTIVITY_TARGETS := comfyui ssh-tunnel tail-logs logs connect connect-container bootstrap-log diagnose
 SNAPSHOT_TARGETS     := list-snapshots snapshot
@@ -159,13 +159,44 @@ bootstrap: ## Bootstrap CDK in your AWS account/region
 # ============================================================================
 
 .PHONY: start
-start: ## Start the ComfyUI instance (set ASG desired=1)
-	@echo "▶️  Starting ComfyUI instance..."
+start: ## Start the ComfyUI instance on Spot pricing (set ASG desired=1)
+	@echo "▶️  Starting ComfyUI instance (Spot mode)..."
+	@ASG_NAME="$(ASG_NAME)"; \
+	POLICY_UPDATE=$$(aws autoscaling describe-auto-scaling-groups \
+		--auto-scaling-group-names "$$ASG_NAME" \
+		--query 'AutoScalingGroups[0].MixedInstancesPolicy' \
+		--output json --region $(REGION) --profile $(AWS_PROFILE) \
+		| python3 -c 'import json,sys; p=json.load(sys.stdin); p["InstancesDistribution"]["OnDemandPercentageAboveBaseCapacity"]=0; print(json.dumps({"InstancesDistribution":p["InstancesDistribution"]}))'); \
+	aws autoscaling update-auto-scaling-group \
+		--auto-scaling-group-name "$$ASG_NAME" \
+		--mixed-instances-policy "$$POLICY_UPDATE" \
+		--region $(REGION) --profile $(AWS_PROFILE) 2>/dev/null || true
 	aws autoscaling set-desired-capacity \
 		--auto-scaling-group-name "$(ASG_NAME)" \
 		--desired-capacity 1 \
 		--region $(REGION) --profile $(AWS_PROFILE)
-	@echo "Instance launching. Run 'make status' to check progress."
+	@echo "Instance launching (Spot). Run 'make status' to check progress."
+	@echo "If no instance appears within a few minutes, try 'make start-on-demand'."
+
+.PHONY: start-on-demand
+start-on-demand: ## Start the ComfyUI instance on On-Demand pricing (fallback when Spot is unavailable)
+	@echo "▶️  Starting ComfyUI instance (On-Demand fallback)..."
+	@ASG_NAME="$(ASG_NAME)"; \
+	POLICY_UPDATE=$$(aws autoscaling describe-auto-scaling-groups \
+		--auto-scaling-group-names "$$ASG_NAME" \
+		--query 'AutoScalingGroups[0].MixedInstancesPolicy' \
+		--output json --region $(REGION) --profile $(AWS_PROFILE) \
+		| python3 -c 'import json,sys; p=json.load(sys.stdin); p["InstancesDistribution"]["OnDemandPercentageAboveBaseCapacity"]=100; print(json.dumps({"InstancesDistribution":p["InstancesDistribution"]}))'); \
+	aws autoscaling update-auto-scaling-group \
+		--auto-scaling-group-name "$$ASG_NAME" \
+		--mixed-instances-policy "$$POLICY_UPDATE" \
+		--region $(REGION) --profile $(AWS_PROFILE)
+	aws autoscaling set-desired-capacity \
+		--auto-scaling-group-name "$(ASG_NAME)" \
+		--desired-capacity 1 \
+		--region $(REGION) --profile $(AWS_PROFILE)
+	@echo "Instance launching (On-Demand). Run 'make status' to check progress."
+	@echo "⚠️  On-Demand mode is active. Next 'make start' will reset to Spot pricing."
 
 .PHONY: stop
 stop: ## Stop the ComfyUI instance (set ASG desired=0, triggers snapshot)
