@@ -82,6 +82,7 @@ class ComfyUISimpleStack(Stack):
         sg = ec2.SecurityGroup(
             self, "InstanceSG",
             vpc=vpc,
+            security_group_name="comfyui-instance-sg",
             description="ComfyUI instance - no inbound, SSM access only",
             allow_all_outbound=True,
         )
@@ -112,6 +113,7 @@ class ComfyUISimpleStack(Stack):
         # ------------------------------------------------------------------ #
         ec2_role = iam.Role(
             self, "EC2Role",
+            role_name=f"comfyui-ec2-role-{self.region}",
             assumed_by=iam.ServicePrincipal("ec2.amazonaws.com"),
             managed_policies=[
                 iam.ManagedPolicy.from_aws_managed_policy_name(
@@ -181,6 +183,7 @@ class ComfyUISimpleStack(Stack):
         # ------------------------------------------------------------------ #
         launch_template = ec2.LaunchTemplate(
             self, "LaunchTemplate",
+            launch_template_name=f"comfyui-{self.stack_name}",
             # no key_pair — SSM Session Manager is the sole access path
             machine_image=ec2.MachineImage.lookup(
                 name="Deep Learning Base OSS Nvidia Driver GPU AMI (Amazon Linux 2023) *",
@@ -256,12 +259,14 @@ class ComfyUISimpleStack(Stack):
         # ------------------------------------------------------------------ #
         snapshot_log_group = logs.LogGroup(
             self, "SnapshotLambdaLogs",
+            log_group_name="/aws/lambda/comfyui-snapshot-handler",
             removal_policy=RemovalPolicy.DESTROY,
             retention=logs.RetentionDays.TWO_WEEKS,
         )
 
         snapshot_lambda = lambda_.Function(
             self, "SnapshotFunction",
+            function_name="comfyui-snapshot-handler",
             runtime=lambda_.Runtime.PYTHON_3_12,
             handler="snapshot_handler.handler",
             code=lambda_.Code.from_asset("lambda"),
@@ -302,6 +307,7 @@ class ComfyUISimpleStack(Stack):
         # ------------------------------------------------------------------ #
         lifecycle_rule = events.Rule(
             self, "LifecycleRule",
+            rule_name="comfyui-asg-termination",
             event_pattern=events.EventPattern(
                 source=["aws.autoscaling"],
                 detail_type=["EC2 Instance-terminate Lifecycle Action"],
@@ -317,6 +323,7 @@ class ComfyUISimpleStack(Stack):
         # ------------------------------------------------------------------ #
         spot_rule = events.Rule(
             self, "SpotInterruptionRule",
+            rule_name="comfyui-spot-interruption",
             event_pattern=events.EventPattern(
                 source=["aws.ec2"],
                 detail_type=["EC2 Spot Instance Interruption Warning"],
@@ -329,6 +336,7 @@ class ComfyUISimpleStack(Stack):
         # ------------------------------------------------------------------ #
         dlm_role = iam.Role(
             self, "DLMRole",
+            role_name=f"comfyui-dlm-role-{self.region}",
             assumed_by=iam.ServicePrincipal("dlm.amazonaws.com"),
             managed_policies=[
                 iam.ManagedPolicy.from_aws_managed_policy_name(

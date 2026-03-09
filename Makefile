@@ -8,6 +8,7 @@ SHELL := /bin/bash
 ENV_STACK_NAME := $(STACK_NAME)
 ENV_HF_TOKEN_PARAM := $(HF_TOKEN_PARAM)
 ENV_LOCAL_PORT := $(LOCAL_PORT)
+ENV_LOCAL_SSH_PORT := $(LOCAL_SSH_PORT)
 ENV_REMOTE_PORT := $(REMOTE_PORT)
 ENV_CONTAINER_NAME := $(CONTAINER_NAME)
 ENV_AWS_PROFILE := $(AWS_PROFILE)
@@ -30,6 +31,7 @@ AWS_PROFILE := $(or $(ENV_AWS_PROFILE),$(AWS_PROFILE),default)
 STACK_NAME := $(or $(ENV_STACK_NAME),$(STACK_NAME),ComfyUISimpleStack)
 HF_TOKEN_PARAM := $(or $(ENV_HF_TOKEN_PARAM),$(HF_TOKEN_PARAM),/comfyui/hf-token)
 LOCAL_PORT := $(or $(ENV_LOCAL_PORT),$(LOCAL_PORT),8181)
+LOCAL_SSH_PORT := $(or $(ENV_LOCAL_SSH_PORT),$(LOCAL_SSH_PORT),2222)
 REMOTE_PORT := $(or $(ENV_REMOTE_PORT),$(REMOTE_PORT),8181)
 CONTAINER_NAME := $(or $(ENV_CONTAINER_NAME),$(CONTAINER_NAME),comfyui)
 AWS_DEFAULT_REGION := $(or $(ENV_AWS_DEFAULT_REGION),$(AWS_DEFAULT_REGION),$(shell aws configure get region --profile $(AWS_PROFILE) 2>/dev/null),eu-west-2)
@@ -50,6 +52,7 @@ export CDK_DEFAULT_ACCOUNT
 export CDK_DEFAULT_REGION
 export STACK_NAME
 export LOCAL_PORT
+export LOCAL_SSH_PORT
 export REMOTE_PORT
 export CONTAINER_NAME
 export INSTANCE_TYPE
@@ -68,7 +71,7 @@ endif
 CDK_TARGETS          := bootstrap ensure-hf-token synth diff deploy destroy
 LIFECYCLE_TARGETS    := start status stop
 CONTAINER_TARGETS    := release-container restart-container
-CONNECTIVITY_TARGETS := comfyui tail-logs logs connect connect-container bootstrap-log diagnose
+CONNECTIVITY_TARGETS := comfyui ssh-tunnel tail-logs logs connect connect-container bootstrap-log diagnose
 SNAPSHOT_TARGETS     := list-snapshots snapshot
 TOKEN_TARGETS        := set-hf-token get-hf-token
 CLEANUP_TARGETS      := delete-volumes delete-snapshots nuke
@@ -276,6 +279,20 @@ comfyui: ## Port-forward ComfyUI (localhost:8181) via SSM
 		--target "$(INSTANCE_ID)" \
 		--document-name AWS-StartPortForwardingSession \
 		--parameters '{"portNumber":["$(REMOTE_PORT)"],"localPortNumber":["$(LOCAL_PORT)"]}' \
+		--region $(REGION) --profile $(AWS_PROFILE)
+
+.PHONY: ssh-tunnel
+ssh-tunnel: ## Port-forward SSH to EC2 host for VS Code Remote-SSH (localhost:2222 -> remote:22)
+	@if [ -z "$(INSTANCE_ID)" ]; then \
+		echo "❌ No running ComfyUI instance found. Run 'make start' first."; \
+		exit 1; \
+	fi
+	@echo "🔐 Port-forwarding SSH on localhost:$(LOCAL_SSH_PORT) -> instance:22"
+	@echo "   Keep this session open while using VS Code Remote-SSH."
+	aws ssm start-session \
+		--target "$(INSTANCE_ID)" \
+		--document-name AWS-StartPortForwardingSession \
+		--parameters '{"portNumber":["22"],"localPortNumber":["$(LOCAL_SSH_PORT)"]}' \
 		--region $(REGION) --profile $(AWS_PROFILE)
 
 .PHONY: connect-container
