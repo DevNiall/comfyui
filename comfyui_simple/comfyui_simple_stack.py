@@ -44,7 +44,6 @@ class ComfyUISimpleStack(Stack):
         # Instance config
         instance_type: str = "g6.2xlarge",
         fallback_instance_types: List[str] = None,
-        spot_max_price: str = "1.20",
         # Data volume
         data_volume_size_gb: int = 500,
         # Snapshots
@@ -207,6 +206,8 @@ class ComfyUISimpleStack(Stack):
         )
 
         # ------------------------------------------------------------------ #
+        # Spot pricing — no price cap so the ASG pays up to on-demand price
+        # rather than failing to launch when spot prices rise above the cap.
         # Auto Scaling Group — 0/1 capacity with Spot pricing
         # ------------------------------------------------------------------ #
         all_instance_types = [instance_type] + [
@@ -229,7 +230,6 @@ class ComfyUISimpleStack(Stack):
                     on_demand_allocation_strategy=autoscaling.OnDemandAllocationStrategy.LOWEST_PRICE,
                     spot_allocation_strategy=autoscaling.SpotAllocationStrategy.LOWEST_PRICE,
                     spot_instance_pools=1,
-                    spot_max_price=spot_max_price,
                 ),
                 launch_template=launch_template,
                 launch_template_overrides=lt_overrides,
