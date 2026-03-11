@@ -71,7 +71,7 @@ endif
 CDK_TARGETS          := bootstrap ensure-hf-token synth diff deploy destroy
 LIFECYCLE_TARGETS    := start start-on-demand status stop
 CONTAINER_TARGETS    := release-container restart-container
-CONNECTIVITY_TARGETS := comfyui ssh-tunnel tail-logs logs connect connect-container bootstrap-log diagnose
+CONNECTIVITY_TARGETS := comfyui ssh-tunnel dev-tunnels monitor-container tail-logs logs connect connect-container bootstrap-log diagnose
 SNAPSHOT_TARGETS     := list-snapshots snapshot
 TOKEN_TARGETS        := set-hf-token get-hf-token
 CLEANUP_TARGETS      := delete-volumes delete-snapshots nuke
@@ -324,6 +324,62 @@ ssh-tunnel: ## Port-forward SSH to EC2 host for VS Code Remote-SSH (localhost:22
 		--target "$(INSTANCE_ID)" \
 		--document-name AWS-StartPortForwardingSession \
 		--parameters '{"portNumber":["22"],"localPortNumber":["$(LOCAL_SSH_PORT)"]}' \
+		--region $(REGION) --profile $(AWS_PROFILE)
+
+.PHONY: dev-tunnels
+dev-tunnels: ## Run ComfyUI + SSH tunnels together (Ctrl+C stops both)
+	@if [ -z "$(INSTANCE_ID)" ]; then \
+		echo "❌ No running ComfyUI instance found. Run 'make start' first."; \
+		exit 1; \
+	fi
+	@set -euo pipefail; \
+	cleanup() { \
+		[ -n "$${COMFY_PID:-}" ] && kill "$$COMFY_PID" 2>/dev/null || true; \
+		[ -n "$${SSH_PID:-}" ] && kill "$$SSH_PID" 2>/dev/null || true; \
+		wait "$${COMFY_PID:-}" "$${SSH_PID:-}" 2>/dev/null || true; \
+	}; \
+	trap cleanup EXIT INT TERM; \
+	echo "🌐 Starting ComfyUI tunnel http://localhost:$(LOCAL_PORT) -> remote:$(REMOTE_PORT)"; \
+	aws ssm start-session \
+		--target "$(INSTANCE_ID)" \
+		--document-name AWS-StartPortForwardingSession \
+		--parameters '{"portNumber":["$(REMOTE_PORT)"],"localPortNumber":["$(LOCAL_PORT)"]}' \
+		--region $(REGION) --profile $(AWS_PROFILE) >/tmp/comfyui-tunnel.log 2>&1 & \
+	COMFY_PID=$$!; \
+	echo "🔐 Starting SSH tunnel localhost:$(LOCAL_SSH_PORT) -> remote:22"; \
+	aws ssm start-session \
+		--target "$(INSTANCE_ID)" \
+		--document-name AWS-StartPortForwardingSession \
+		--parameters '{"portNumber":["22"],"localPortNumber":["$(LOCAL_SSH_PORT)"]}' \
+		--region $(REGION) --profile $(AWS_PROFILE) >/tmp/comfyui-ssh-tunnel.log 2>&1 & \
+	SSH_PID=$$!; \
+	sleep 2; \
+	if ! kill -0 "$$COMFY_PID" 2>/dev/null; then \
+		echo "❌ ComfyUI tunnel failed to start. Check /tmp/comfyui-tunnel.log"; \
+		exit 1; \
+	fi; \
+	if ! kill -0 "$$SSH_PID" 2>/dev/null; then \
+		echo "❌ SSH tunnel failed to start. Check /tmp/comfyui-ssh-tunnel.log"; \
+		exit 1; \
+	fi; \
+	echo "✅ Both tunnels are running."; \
+	echo "   ComfyUI: http://localhost:$(LOCAL_PORT)"; \
+	echo "   SSH:     localhost:$(LOCAL_SSH_PORT)"; \
+	echo "   Logs: /tmp/comfyui-tunnel.log and /tmp/comfyui-ssh-tunnel.log"; \
+	echo "   Press Ctrl+C to stop both."; \
+	wait "$$COMFY_PID" "$$SSH_PID"
+
+.PHONY: monitor-container
+monitor-container: ## Open monitor session in remote ComfyUI container (btop + nvitop)
+	@if [ -z "$(INSTANCE_ID)" ]; then \
+		echo "❌ No running ComfyUI instance found. Run 'make start' first."; \
+		exit 1; \
+	fi
+	@echo "📊 Opening remote monitor in container $(CONTAINER_NAME) on $(INSTANCE_ID)..."
+	aws ssm start-session \
+		--target "$(INSTANCE_ID)" \
+		--document-name AWS-StartInteractiveCommand \
+		--parameters '{"command":["sudo docker exec -it $(CONTAINER_NAME) /bin/bash -lc \"set -euo pipefail; command -v tmux >/dev/null 2>&1 || { echo tmux not found in container; exit 1; }; command -v btop >/dev/null 2>&1 || { echo btop not found in container; exit 1; }; command -v nvitop >/dev/null 2>&1 || { echo nvitop not found in container; exit 1; }; if tmux has-session -t comfyui-monitor 2>/dev/null; then echo attaching to existing comfyui-monitor session; else tmux new-session -d -s comfyui-monitor \\\"btop --utf-force\\\"; tmux split-window -h -t comfyui-monitor:0 \\\"nvitop\\\"; tmux select-layout -t comfyui-monitor:0 even-horizontal; fi; exec tmux attach -t comfyui-monitor\""]}' \
 		--region $(REGION) --profile $(AWS_PROFILE)
 
 .PHONY: connect-container
