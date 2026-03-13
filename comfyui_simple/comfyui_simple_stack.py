@@ -54,12 +54,24 @@ class ComfyUISimpleStack(Stack):
         hf_token_param_path: str = "/comfyui/hf-token",
         # VPC ID (required — stack will raise if not provided)
         vpc_id: str = "vpc-0a0078c96978cb8bb",
+        # Subnet type: "private" (PRIVATE_WITH_EGRESS) or "public" (PUBLIC).
+        # Use "public" when deploying into a VPC that only has public subnets
+        # (e.g. the default VPC in a new region). Security posture is unchanged
+        # because the security group has no inbound rules.
+        subnet_type: str = "private",
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
         if fallback_instance_types is None:
             fallback_instance_types = ["g4dn.2xlarge", "g6.xlarge", "g5.2xlarge", "g5.xlarge", "g4dn.xlarge"]
+
+        # Resolve subnet type
+        _subnet_type_map = {
+            "private": ec2.SubnetType.PRIVATE_WITH_EGRESS,
+            "public": ec2.SubnetType.PUBLIC,
+        }
+        _resolved_subnet_type = _subnet_type_map.get(subnet_type.lower(), ec2.SubnetType.PRIVATE_WITH_EGRESS)
 
         # Unique suffix for resource naming
         unique_input = f"{self.account}-{self.region}-{self.stack_name}"
@@ -240,7 +252,7 @@ class ComfyUISimpleStack(Stack):
             desired_capacity=1,
             auto_scaling_group_name=f"ComfyUI-ASG-{suffix}",
             new_instances_protected_from_scale_in=False,
-            vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
+            vpc_subnets=ec2.SubnetSelection(subnet_type=_resolved_subnet_type),
         )
 
         Tags.of(asg).add("Name", "ComfyUI-Host")

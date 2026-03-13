@@ -70,6 +70,7 @@ ComfyUISimpleStack(
     snapshot_retain_count=_int_config(config, "SNAPSHOT_RETAIN_COUNT", 3),
     hf_token_param_path=str(config.get("HF_TOKEN_PARAM", "/comfyui/hf-token")),
     vpc_id=str(config.get("VPC_ID", "vpc-0a0078c96978cb8bb")),
+    subnet_type=str(config.get("SUBNET_TYPE", "private")),
 )
 
 app.synth()

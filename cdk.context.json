@@ -84,5 +84,38 @@
       }
     ]
   },
-  "ami:account=237518208051:filters.image-type.0=machine:filters.name.0=Deep Learning Base OSS Nvidia Driver GPU AMI (Amazon Linux 2023) *:filters.state.0=available:owners.0=amazon:region=eu-west-2": "ami-0ba91b27432ca0d0e"
+  "ami:account=237518208051:filters.image-type.0=machine:filters.name.0=Deep Learning Base OSS Nvidia Driver GPU AMI (Amazon Linux 2023) *:filters.state.0=available:owners.0=amazon:region=eu-west-2": "ami-0ba91b27432ca0d0e",
+  "vpc-provider:account=237518208051:filter.vpc-id=vpc-0d88b860a829eedf0:region=eu-north-1:returnAsymmetricSubnets=true": {
+    "vpcId": "vpc-0d88b860a829eedf0",
+    "vpcCidrBlock": "172.31.0.0/16",
+    "ownerAccountId": "237518208051",
+    "availabilityZones": [],
+    "subnetGroups": [
+      {
+        "name": "Public",
+        "type": "Public",
+        "subnets": [
+          {
+            "subnetId": "subnet-03bc9c881de5dd607",
+            "cidr": "172.31.16.0/20",
+            "availabilityZone": "eu-north-1a",
+            "routeTableId": "rtb-0a16b1fdbd46b2c71"
+          },
+          {
+            "subnetId": "subnet-0e1c2f4d4eac6340a",
+            "cidr": "172.31.32.0/20",
+            "availabilityZone": "eu-north-1b",
+            "routeTableId": "rtb-0a16b1fdbd46b2c71"
+          },
+          {
+            "subnetId": "subnet-09371eb261ed94c61",
+            "cidr": "172.31.0.0/20",
+            "availabilityZone": "eu-north-1c",
+            "routeTableId": "rtb-0a16b1fdbd46b2c71"
+          }
+        ]
+      }
+    ]
+  },
+  "ami:account=237518208051:filters.image-type.0=machine:filters.name.0=Deep Learning Base OSS Nvidia Driver GPU AMI (Amazon Linux 2023) *:filters.state.0=available:owners.0=amazon:region=eu-north-1": "ami-0ee907b0dea8f6411"
 }
